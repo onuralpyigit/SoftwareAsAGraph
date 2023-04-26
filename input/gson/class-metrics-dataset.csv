@@ -1,0 +1,113 @@
+QualifiedName	Name	Complexity	Coupling	Size	Lack of Cohesion	CBO	RFC	SRFC	DIT	NOC	WMC	LOC	CMLOC	NOF	NOSF	NOM	NOSM	NORM	LCOM	LCAM	LTCC	ATFD	SI	Coverage	
+gson-master
+<Package>com.google.gson	com.google.gson	low-medium	medium-high	medium-high	low						374	1319													
+com.google.gson.ExclusionStrategy	ExclusionStrategy	low	low	low	low	1	2	0	1	0	2	3	2	0	0	2	0	0	0.0	0.333	0.0	0	0.0		
+com.google.gson.FieldAttributes	FieldAttributes	low	low	low	low-medium	0	19	10	1	0	9	21	19	1	0	9	0	0	0.0	0.667	0.0	0	0.0		
+com.google.gson.FieldNamingPolicy	FieldNamingPolicy	low-medium	low	low	low	0	12	10	2	0	9	50	21	0	7	0	2	0	0.0	0.167	0.0	0	0.0		
+com.google.gson.FieldNamingStrategy	FieldNamingStrategy	low	low	low	low	0	1	0	1	1	1	2	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.FormattingStyle	FormattingStyle	low	low	low	low	0	7	2	1	0	7	24	19	2	1	5	0	0	0.75	0.2	0.667	0	0.0		
+com.google.gson.Gson	Gson	medium-high	very-high	medium-high	high	32	111	65	1	0	81	452	394	25	13	36	5	0	0.956	0.892	0.968	2	0.0		
+com.google.gson.GsonBuilder	GsonBuilder	low-medium	medium-high	medium-high	high	16	63	28	1	0	49	196	175	20	0	32	0	0	0.906	0.897	0.878	0	0.0		
+com.google.gson.InstanceCreator<T>	InstanceCreator	low	low	low	low	0	1	0	1	2	1	2	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.JsonArray	JsonArray	low-medium	low	medium-high	high	3	60	27	2	0	42	97	95	1	0	33	0	12	0.0	0.842	0.617	0	0.727		
+com.google.gson.JsonDeserializationContext	JsonDeserializationContext	low	low	low	low	1	1	0	1	1	1	3	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.JsonDeserializer<T>	JsonDeserializer	low	low	low	low	2	1	0	1	1	1	3	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.JsonElement	JsonElement	low-medium	low-medium	low-medium	low	6	29	9	1	4	28	63	62	0	0	23	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.JsonIOException	JsonIOException	medium-high	low	low	low	0	3	0	5	0	3	8	6	0	1	3	0	0	0.0	0.222	0.0	0	0.0		
+com.google.gson.JsonNull	JsonNull	low-medium	low	low	low	0	5	1	2	0	4	13	11	0	1	4	0	0	0.0	0.375	1.0	0	0.0		
+com.google.gson.JsonObject	JsonObject	low-medium	low	low	medium-high	4	47	13	2	0	26	49	47	1	0	20	0	0	0.0	0.743	0.447	0	0.0		
+com.google.gson.JsonParseException	JsonParseException	medium-high	low	low	low	0	3	0	4	2	3	8	6	0	1	3	0	0	0.0	0.222	0.0	0	0.0		
+com.google.gson.JsonParser	JsonParser	low	low-medium	low	low	8	35	8	1	0	14	42	41	0	0	4	3	0	0.0	0.536	0.0	1	0.0		
+com.google.gson.JsonPrimitive	JsonPrimitive	medium-high	low	low-medium	high	1	49	32	2	0	53	115	113	1	0	22	1	12	0.0	0.82	0.606	0	1.091		
+com.google.gson.JsonSerializationContext	JsonSerializationContext	low	low	low	low	1	2	0	1	1	2	3	2	0	0	2	0	0	0.0	0.167	0.0	0	0.0		
+com.google.gson.JsonSerializer<T>	JsonSerializer	low	low	low	low	2	1	0	1	1	1	2	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.JsonStreamParser	JsonStreamParser	low	low-medium	low	low	8	31	4	1	0	10	31	28	2	0	5	0	0	0.25	0.533	0.7	0	0.0		
+com.google.gson.JsonSyntaxException	JsonSyntaxException	medium-high	low	low	low	0	3	0	5	0	3	8	6	0	1	3	0	0	0.0	0.222	0.0	0	0.0		
+com.google.gson.LongSerializationPolicy	LongSerializationPolicy	low-medium	low	low	low	1	1	0	2	0	1	14	1	0	2	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.ReflectionAccessFilter	ReflectionAccessFilter	low	low	low	low	0	1	0	1	0	1	31	1	0	4	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.ToNumberPolicy	ToNumberPolicy	low-medium	low	low	low	0	0	0	2	0	0	30	0	0	4	0	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.ToNumberStrategy	ToNumberStrategy	low	low	low	low	1	1	0	1	1	1	2	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.TypeAdapter<T>	TypeAdapter	low	low-medium	low	medium-high	6	13	6	1	28	13	45	44	0	0	10	0	0	0.0	0.75	0.0	0	0.0		
+com.google.gson.TypeAdapterFactory	TypeAdapterFactory	low	low	low	low	3	1	0	1	17	1	2	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+<Package>com.google.gson.annotations	com.google.gson.annotations	low	low	low	low						8	27													
+com.google.gson.annotations.Expose	Expose	low	low	low	low	0	2	0	1	0	2	6	2	0	0	2	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.annotations.JsonAdapter	JsonAdapter	low	low	low	low	0	2	0	1	0	2	5	2	0	0	2	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.annotations.SerializedName	SerializedName	low	low	low	low	0	2	0	1	0	2	6	2	0	0	2	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.annotations.Since	Since	low	low	low	low	0	1	0	1	0	1	5	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.annotations.Until	Until	low	low	low	low	0	1	0	1	0	1	5	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+<Package>com.google.gson.examples.android	com.google.gson.examples.android	low	low	low	low						0	23													
+com.google.gson.examples.android.GsonProguardExampleActivity	GsonProguardExampleActivity	low	low	low	low	0	0	0	0	0	0	23	0	0	0	0	0	0	0.0	0.0	0.0	0	0.0		
+<Package>com.google.gson.examples.android.model	com.google.gson.examples.android.model	low	low	low	low						2	77													
+com.google.gson.examples.android.model.Cart	Cart	low	low	low-medium	low	0	0	0	0	0	0	55	0	0	0	0	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.examples.android.model.LineItem	LineItem	low	low	low	low	0	2	0	0	0	2	22	4	2	0	2	0	0	1.0	0.0	1.0	0	0.0		
+<Package>com.google.gson.extras.examples.rawcollections	com.google.gson.extras.examples.rawcollections	low	low	low	low						3	24													
+com.google.gson.extras.examples.rawcollections.RawCollectionsExample	RawCollectionsExample	low-medium	low	low	low	4	79	8	1	0	1	24	14	0	0	0	1	0	0.0	0.0	0.0	0	0.0		
+<Package>com.google.gson.graph	com.google.gson.graph	low	low	low	low						20	136													
+com.google.gson.graph.GraphAdapterBuilder	GraphAdapterBuilder	low	low	low-medium	low	5	50	9	1	0	7	136	21	2	0	4	0	0	0.5	0.5	0.333	0	0.0		
+<Package>com.google.gson.interceptors	com.google.gson.interceptors	low	low	low	low						8	30													
+com.google.gson.interceptors.Intercept	Intercept	low	low	low	low	0	1	0	1	0	1	5	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.interceptors.InterceptorFactory	InterceptorFactory	low	low	low	low	4	6	3	1	0	2	23	6	0	0	1	0	0	0.0	0.0	0.0	1	0.0		
+com.google.gson.interceptors.JsonPostDeserializer<T>	JsonPostDeserializer	low	low	low	low	0	1	0	1	0	1	2	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+<Package>com.google.gson.internal	com.google.gson.internal	low-medium	low-medium	medium-high	low						460	1405													
+com.google.gson.internal.$Gson$Preconditions	$Gson$Preconditions	low	low	low	low	0	3	0	1	0	5	11	10	0	0	1	2	0	0.0	0.444	0.0	0	0.0		
+com.google.gson.internal.$Gson$Types	$Gson$Types	medium-high	low	medium-high	low-medium	1	49	43	1	0	86	328	233	0	1	1	20	0	0.0	0.603	1.0	0	0.0		
+com.google.gson.internal.ConstructorConstructor	ConstructorConstructor	low-medium	low-medium	low-medium	low-medium	6	37	21	1	0	35	208	204	3	0	4	4	0	0.556	0.687	0.0	1	0.0		
+com.google.gson.internal.Excluder	Excluder	low-medium	low-medium	low-medium	high	8	37	29	1	0	47	124	115	6	2	17	0	0	0.833	0.802	0.821	1	0.0		
+com.google.gson.internal.GsonBuildConfig	GsonBuildConfig	low	low	low	low	0	1	0	0	0	1	3	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.internal.JavaVersion	JavaVersion	low	low	low	low	0	15	11	1	0	15	39	37	0	1	1	6	0	0.0	0.286	0.0	0	0.0		
+com.google.gson.internal.JsonReaderInternalAccess	JsonReaderInternalAccess	low	low	low	low	1	1	0	1	1	1	3	1	0	1	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.internal.LazilyParsedNumber	LazilyParsedNumber	low-medium	low	low	low-medium	0	18	8	2	0	15	44	41	1	0	10	0	0	0.0	0.675	0.0	0	0.0		
+com.google.gson.internal.LinkedTreeMap<K,V>	LinkedTreeMap	medium-high	low	medium-high	medium-high	0	33	19	2	0	86	360	229	8	1	23	0	6	0.833	0.783	0.891	0	0.522		
+com.google.gson.internal.NonNullElementWrapperList<E>	NonNullElementWrapperList	low-medium	low	low	medium-high	0	35	18	3	0	19	40	38	1	0	18	0	10	0.0	0.73	0.0	0	1.667		
+com.google.gson.internal.ObjectConstructor<T>	ObjectConstructor	low	low	low	low	0	1	0	1	20	1	2	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.internal.PreJava9DateFormatProvider	PreJava9DateFormatProvider	low	low	low	low	0	5	3	1	0	17	41	40	0	0	0	5	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.internal.Primitives	Primitives	low-medium	low	low	low	0	6	1	1	0	23	38	37	0	0	1	4	0	0.0	0.4	0.0	0	0.0		
+com.google.gson.internal.ReflectionAccessFilterHelper	ReflectionAccessFilterHelper	low	low	low	low-medium	2	12	6	1	0	10	48	25	0	0	1	7	0	0.0	0.646	0.0	0	0.0		
+com.google.gson.internal.Streams	Streams	low	low-medium	low-medium	low	9	29	3	1	0	10	60	22	0	0	1	3	0	0.0	0.6	0.0	0	0.0		
+com.google.gson.internal.UnsafeAllocator	UnsafeAllocator	low	low	low-medium	low	1	16	9	1	4	7	56	54	0	1	1	2	0	0.0	0.167	0.0	0	0.0		
+<Package>com.google.gson.internal.bind	com.google.gson.internal.bind	low-medium	medium-high	medium-high	low						389	1917													
+com.google.gson.internal.bind.ArrayTypeAdapter<E>	ArrayTypeAdapter	low-medium	low-medium	low	low	6	64	19	2	0	9	49	34	2	1	3	0	0	0.667	0.571	0.0	0	0.0		
+com.google.gson.internal.bind.CollectionTypeAdapterFactory	CollectionTypeAdapterFactory	low-medium	low-medium	low	low	6	77	7	1	0	3	44	14	1	0	2	0	0	0.0	0.375	0.0	1	0.0		
+com.google.gson.internal.bind.DateTypeAdapter	DateTypeAdapter	low-medium	low-medium	low	low	8	86	18	2	0	11	38	31	1	1	4	0	0	0.75	0.5	0.667	1	0.0		
+com.google.gson.internal.bind.DefaultDateTypeAdapter<T>	DefaultDateTypeAdapter	low-medium	low-medium	low-medium	low-medium	7	98	26	2	0	18	77	54	2	1	7	0	0	0.556	0.653	0.667	1	0.0		
+com.google.gson.internal.bind.JsonAdapterAnnotationTypeAdapterFactory	JsonAdapterAnnotationTypeAdapterFactory	low	low-medium	low	low	9	48	13	1	0	12	40	38	1	0	3	0	0	0.0	0.333	0.0	1	0.0		
+com.google.gson.internal.bind.JsonTreeReader	JsonTreeReader	medium-high	low-medium	low-medium	medium-high	6	67	39	2	0	84	216	204	4	2	28	0	17	0.647	0.764	0.653	1	1.214		
+com.google.gson.internal.bind.JsonTreeWriter	JsonTreeWriter	low-medium	low	low-medium	high	5	48	19	2	0	48	115	102	3	2	20	0	16	0.733	0.833	0.863	0	1.6		
+com.google.gson.internal.bind.MapTypeAdapterFactory	MapTypeAdapterFactory	low-medium	low-medium	low-medium	low	7	78	8	1	0	6	113	21	2	0	3	0	0	0.5	0.5	0.0	1	0.0		
+com.google.gson.internal.bind.NumberTypeAdapter	NumberTypeAdapter	low-medium	low-medium	low	low	7	52	6	2	0	9	30	27	1	1	3	2	0	0.75	0.56	1.0	0	0.0		
+com.google.gson.internal.bind.ObjectTypeAdapter	ObjectTypeAdapter	low-medium	low-medium	low-medium	low-medium	8	88	25	2	0	25	90	86	2	1	5	2	0	0.778	0.633	1.0	0	0.0		
+com.google.gson.internal.bind.ReflectiveTypeAdapterFactory	ReflectiveTypeAdapterFactory	medium-high	medium-high	low-medium	medium-high	17	146	43	1	0	37	300	164	5	0	6	1	0	0.72	0.724	0.0	1	0.0		
+com.google.gson.internal.bind.SerializationDelegatingTypeAdapter<T>	SerializationDelegatingTypeAdapter	low-medium	low	low	low	0	1	0	2	2	1	2	1	0	0	1	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.internal.bind.TreeTypeAdapter<T>	TreeTypeAdapter	low-medium	low-medium	low-medium	medium-high	10	59	12	3	0	17	89	43	8	0	6	3	0	0.656	0.731	0.821	1	0.0		
+com.google.gson.internal.bind.TypeAdapterRuntimeTypeWrapper<T>	TypeAdapterRuntimeTypeWrapper	low-medium	low	low	low-medium	5	21	8	2	0	13	36	32	3	0	3	2	0	0.333	0.65	0.0	0	0.0		
+com.google.gson.internal.bind.TypeAdapters	TypeAdapters	low	low	medium-high	low	3	6	0	1	0	6	678	61	0	50	1	5	0	0.0	0.333	1.0	0	0.0		
+<Package>com.google.gson.internal.bind.util	com.google.gson.internal.bind.util	low	low	low	low						55	165													
+com.google.gson.internal.bind.util.ISO8601Utils	ISO8601Utils	medium-high	low	low-medium	low-medium	0	38	35	1	0	55	165	162	0	2	0	8	0	0.75	0.653	0.5	0	0.0		
+<Package>com.google.gson.internal.reflect	com.google.gson.internal.reflect	low	low	low	low						42	144													
+com.google.gson.internal.reflect.ReflectionHelper	ReflectionHelper	low-medium	low	low-medium	medium-high	1	37	28	1	0	23	144	71	0	1	1	12	0	0.0	0.761	0.867	0	0.0		
+<Package>com.google.gson.internal.sql	com.google.gson.internal.sql	low	low	low	low						17	116													
+com.google.gson.internal.sql.SqlDateTypeAdapter	SqlDateTypeAdapter	low-medium	low	low	low	5	54	9	2	0	6	32	23	1	1	3	0	0	1.0	0.5	0.0	0	0.0		
+com.google.gson.internal.sql.SqlTimeTypeAdapter	SqlTimeTypeAdapter	low-medium	low	low	low	5	54	9	2	0	6	28	20	1	1	3	0	0	1.0	0.5	0.0	0	0.0		
+com.google.gson.internal.sql.SqlTimestampTypeAdapter	SqlTimestampTypeAdapter	low-medium	low	low	low	3	6	3	2	0	4	21	9	1	1	3	0	0	0.75	0.533	0.0	0	0.0		
+com.google.gson.internal.sql.SqlTypesSupport	SqlTypesSupport	low	low	low	low	2	1	0	1	0	1	35	1	0	6	1	0	0	0.0	0.0	0.0	0	0.0		
+<Package>com.google.gson.metrics	com.google.gson.metrics	low	low-medium	medium-high	low						110	490													
+com.google.gson.metrics.BagOfPrimitives	BagOfPrimitives	low	low	low	medium-high	1	10	3	1	0	11	46	40	4	1	7	0	0	0.433	0.714	0.286	0	0.0		
+com.google.gson.metrics.BagOfPrimitivesDeserializationBenchmark	BagOfPrimitivesDeserializationBenchmark	medium-high	low	low-medium	low	4	106	20	1	0	20	58	55	2	0	4	1	0	0.333	0.4	0.5	0	0.0		
+com.google.gson.metrics.CollectionsDeserializationBenchmark	CollectionsDeserializationBenchmark	low-medium	low	low-medium	low	5	99	23	1	0	23	73	68	2	2	4	1	0	0.667	0.4	0.5	0	0.0		
+com.google.gson.metrics.NonUploadingCaliperRunner	NonUploadingCaliperRunner	low	low	low	low	1	4	3	1	0	3	11	10	0	0	0	2	0	0.0	0.167	0.0	0	0.0		
+com.google.gson.metrics.ParseBenchmark	ParseBenchmark	low	low	low-medium	low	1	23	17	1	0	9	288	31	4	0	2	3	0	0.25	0.4	1.0	0	0.0		
+com.google.gson.metrics.SerializationBenchmark	SerializationBenchmark	low-medium	low	low	low	4	55	4	1	0	5	14	9	3	0	2	1	0	0.333	0.444	1.0	0	0.0		
+<Package>com.google.gson.protobuf	com.google.gson.protobuf	low	low	low	low						45	181													
+com.google.gson.protobuf.ProtoTypeAdapter	ProtoTypeAdapter	low-medium	medium-high	low-medium	medium-high	18	73	52	1	0	39	181	136	5	2	7	2	0	0.837	0.8	0.667	0	0.0		
+<Package>com.google.gson.reflect	com.google.gson.reflect	low	low	low	low						50	150													
+com.google.gson.reflect.TypeToken<T>	TypeToken	low-medium	low	low-medium	medium-high	1	55	33	1	0	50	150	146	3	0	11	9	0	0.524	0.75	0.894	0	0.0		
+<Package>com.google.gson.stream	com.google.gson.stream	low-medium	low	low-medium	low						461	1210													
+com.google.gson.stream.JsonReader	JsonReader	very-high	low	high	medium-high	3	62	43	1	1	368	928	864	15	28	40	0	0	0.857	0.787	0.481	0	0.0		
+com.google.gson.stream.JsonScope	JsonScope	low	low	low	low	0	0	0	1	0	0	9	0	0	8	0	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.stream.JsonToken	JsonToken	low-medium	low	low	low	0	0	0	2	0	0	11	0	0	10	0	0	0	0.0	0.0	0.0	0	0.0		
+com.google.gson.stream.JsonWriter	JsonWriter	medium-high	low	medium-high	high	2	64	40	1	1	90	254	223	9	3	36	1	0	0.882	0.875	0.785	1	0.0		
+com.google.gson.stream.MalformedJsonException	MalformedJsonException	medium-high	low	low	low	0	3	0	4	0	3	8	6	0	1	3	0	0	0.0	0.222	0.0	0	0.0		
+<Package>com.google.gson.typeadapters	com.google.gson.typeadapters	low	low	low-medium	low						72	259													
+com.google.gson.typeadapters.PostConstructAdapterFactory	PostConstructAdapterFactory	low	low	low	low	3	9	6	1	0	5	29	9	0	0	1	0	0	0.0	0.0	0.0	1	0.0		
+com.google.gson.typeadapters.RuntimeTypeAdapterFactory<T>	RuntimeTypeAdapterFactory	low	low	low-medium	low	3	31	13	1	0	18	88	81	6	0	5	3	0	0.833	0.542	0.905	1	0.0		
+com.google.gson.typeadapters.UtcDateTypeAdapter	UtcDateTypeAdapter	low-medium	low	low-medium	medium-high	4	72	33	2	0	42	142	139	1	1	2	5	0	1.0	0.714	1.0	0	0.0		
