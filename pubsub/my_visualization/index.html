@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Publish-Subscribe System Visualization</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Publish-Subscribe System Visualization</h1>
+            <div class="controls">
+                <div class="control-group">
+                    <label for="view-select">View:</label>
+                    <select id="view-select">
+                        <option value="complete">Complete System</option>
+                        <option value="application">Application Layer</option>
+                        <option value="infrastructure">Infrastructure Layer</option>
+                        <option value="messaging">Messaging Layer</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label for="highlight-critical">Highlight Critical Components:</label>
+                    <input type="checkbox" id="highlight-critical" checked>
+                </div>
+                <div class="control-group">
+                    <label for="display-labels">Show Labels:</label>
+                    <input type="checkbox" id="display-labels" checked>
+                </div>
+                <div class="control-group">
+                    <label for="use-shapes">Use Shapes:</label>
+                    <input type="checkbox" id="use-shapes" checked>
+                </div>
+                <div class="control-group">
+                    <label for="simulate-failure">Simulate Failure:</label>
+                    <select id="simulate-failure">
+                        <option value="none">None</option>
+                        <option value="broker">Broker Failure</option>
+                        <option value="node">Node Failure</option>
+                        <option value="application">Application Failure</option>
+                        <option value="topic">Topic Failure</option>
+                    </select>
+                </div>
+            </div>
+        </header>
+        <div class="main-content">
+            <div class="visualization-container">
+                <svg id="visualization"></svg>
+            </div>
+            <div class="sidebar">
+                <div class="panel">
+                    <div class="legend">
+                        <h3>Legend</h3>
+                        <div class="legend-item">
+                            <div class="legend-shape application"></div>
+                            <div>Application (Circle)</div>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-shape broker"></div>
+                            <div>Broker (Diamond)</div>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-shape topic"></div>
+                            <div>Topic (Square)</div>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-shape node"></div>
+                            <div>Node (Triangle)</div>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color critical"></div>
+                            <div>Critical Component</div>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color impacted"></div>
+                            <div>Impacted Component</div>
+                        </div>
+                    </div>
+                    <div class="node-info">
+                        <h3>Component Information</h3>
+                        <div id="node-details">
+                            <p>Click on a component to see details</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="recommendations-panel">
+                    <h3>Improvement Recommendations</h3>
+                    <div class="tab-container">
+                        <div class="tabs">
+                            <button class="tab-btn active" data-tab="redundancy">Redundancy</button>
+                            <button class="tab-btn" data-tab="load-balancing">Load Balancing</button>
+                            <button class="tab-btn" data-tab="decoupling">Decoupling</button>
+                            <button class="tab-btn" data-tab="monitoring">Monitoring</button>
+                        </div>
+                        <div id="redundancy" class="tab-content active">
+                            <ul id="redundancy-recs"></ul>
+                        </div>
+                        <div id="load-balancing" class="tab-content">
+                            <ul id="load-balancing-recs"></ul>
+                        </div>
+                        <div id="decoupling" class="tab-content">
+                            <ul id="decoupling-recs"></ul>
+                        </div>
+                        <div id="monitoring" class="tab-content">
+                            <ul id="monitoring-recs"></ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="failure-impact-panel">
+                    <h3>Failure Impact Assessment</h3>
+                    <div id="impact-details">
+                        <p>Select a failure scenario from the dropdown menu</p>
+                        <div id="impact-stats"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="graph_data.js"></script>
+    <script src="visualization.js"></script>
+</body>
+</html>

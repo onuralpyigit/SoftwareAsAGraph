@@ -1,0 +1,297 @@
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #f5f5f5;
+}
+
+.container {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    max-width: 1800px;
+    margin: 0 auto;
+    background-color: white;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+header {
+    padding: 15px;
+    border-bottom: 1px solid #ddd;
+    background-color: #f8f8f8;
+}
+
+h1 {
+    margin: 0 0 15px 0;
+    font-size: 1.8em;
+    color: #333;
+}
+
+.controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    align-items: center;
+}
+
+.control-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+select, input {
+    padding: 5px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+.main-content {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+.visualization-container {
+    flex: 3;
+    height: 100%;
+    border-right: 1px solid #ddd;
+    overflow: hidden;
+}
+
+.sidebar {
+    flex: 2;
+    display: flex;
+    flex-direction: column;
+    max-width: 500px;
+    overflow-y: auto;
+}
+
+svg {
+    width: 100%;
+    height: 100%;
+}
+
+.panel, .recommendations-panel, .failure-impact-panel {
+    padding: 15px;
+    border-bottom: 1px solid #ddd;
+}
+
+.legend, .node-info {
+    margin-bottom: 20px;
+}
+
+h3 {
+    margin-top: 0;
+    margin-bottom: 10px;
+    font-size: 1.2em;
+    color: #333;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+    gap: 10px;
+}
+
+.legend-color, .legend-shape {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+}
+
+.legend-shape.application {
+    background-color: #6baed6;
+    border-radius: 50%;
+}
+
+.legend-shape.broker {
+    background-color: #fd8d3c;
+    border-radius: 0;
+    transform: rotate(45deg);
+}
+
+.legend-shape.topic {
+    background-color: #74c476;
+    border-radius: 0;
+}
+
+.legend-shape.node {
+    background-color: #fb9a99;
+    border-radius: 0;
+    clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+    height: 17px;
+}
+
+.critical {
+    background-color: #fb6a6a;
+    border: 2px solid #b10026;
+}
+
+.impacted {
+    background-color: #ffeda0;
+    border: 2px solid #feb24c;
+}
+
+/* D3.js styles */
+.node circle, .node rect, .node polygon {
+    stroke-width: 2px;
+}
+
+.node.application circle {
+    fill: #6baed6;
+    stroke: #3182bd;
+}
+
+.node.broker polygon.diamond {
+    fill: #fd8d3c;
+    stroke: #e6550d;
+}
+
+.node.topic rect {
+    fill: #74c476;
+    stroke: #31a354;
+}
+
+.node.node polygon.triangle {
+    fill: #fb9a99;
+    stroke: #e31a1c;
+}
+
+.node.critical circle, 
+.node.critical rect, 
+.node.critical polygon {
+    stroke: #b10026;
+    stroke-width: 3px;
+}
+
+.node.impacted circle, 
+.node.impacted rect, 
+.node.impacted polygon {
+    fill: #ffeda0;
+    stroke: #feb24c;
+    stroke-width: 2.5px;
+}
+
+.link {
+    stroke-opacity: 0.6;
+}
+
+.link.PUBLISHES_TO {
+    stroke: #41ab5d;
+}
+
+.link.SUBSCRIBES_TO {
+    stroke: #3182bd;
+}
+
+.link.ROUTES {
+    stroke: #e6550d;
+}
+
+.link.RUNS_ON {
+    stroke: #999;
+}
+
+.link.DEPENDS_ON {
+    stroke: #e31a1c;
+}
+
+.link.CONNECTS_TO {
+    stroke: #000;
+}
+
+.tab-container {
+    width: 100%;
+}
+
+.tabs {
+    display: flex;
+    overflow-x: auto;
+    border-bottom: 1px solid #ddd;
+}
+
+.tab-btn {
+    padding: 8px 16px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background-color 0.3s;
+}
+
+.tab-btn:hover {
+    background-color: #f0f0f0;
+}
+
+.tab-btn.active {
+    background-color: #e6e6e6;
+    border-bottom: 2px solid #4a90e2;
+}
+
+.tab-content {
+    display: none;
+    padding: 15px 0;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+#impact-stats {
+    margin-top: 10px;
+}
+
+.impact-stat {
+    margin-bottom: 10px;
+}
+
+.impact-stat .bar-container {
+    height: 20px;
+    width: 100%;
+    background-color: #f0f0f0;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-top: 5px;
+}
+
+.impact-stat .bar {
+    height: 100%;
+    background-color: #feb24c;
+}
+
+.impact-stat .severity {
+    font-weight: bold;
+    margin-top: 5px;
+}
+
+.severity.low {
+    color: green;
+}
+
+.severity.moderate {
+    color: orange;
+}
+
+.severity.high {
+    color: #e31a1c;
+}
+
+.severity.severe {
+    color: #b10026;
+}
+
+#node-details h4 {
+    margin-top: 0;
+    margin-bottom: 10px;
+}
+
+#node-details p {
+    margin: 5px 0;
+}
+
+#node-details ul {
+    margin: 5px 0;
+    padding-left: 20px;
+}
