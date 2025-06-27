@@ -124,7 +124,10 @@ def create_system(graph, config):
 
     # Topics
     topics = [create_node(graph, "Topic", f"Topic-{i+1}", 
-                         {"message_type": random.choice(["Command", "Event", "Query", "Response"])}) 
+                         {"message_type": random.choice(["Command", "Event", "Query", "Response"]),
+                          "message_size": random.randint(128, 65536),
+                          "durability": random.choice(["Volatile", "Transient", "Persistent"]),
+                          "relability": random.choice(["Reliable", "Best Effort"])}) 
               for i in range(config.num_topics)]
     
     return brokers, nodes, applications, topics
