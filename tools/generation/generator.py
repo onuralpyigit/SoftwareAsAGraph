@@ -22,6 +22,7 @@ from saag.core.models import (
 )
 from .models import (
     GraphConfig,
+    NetworkConfig,
     StatisticalMetric,
     DURABILITY_OPTIONS,
     RELIABILITY_OPTIONS,
@@ -1372,6 +1373,44 @@ class StatisticalGraphGenerator:
             connects.append(self._make_edge(nodes[i], nodes[j]))
         return connects
 
+    #: Offset of the fabric's RNG stream from the generator seed. A stream of its
+    #: own, so adding a ``network:`` block cannot shift any other draw.
+    FABRIC_SEED_OFFSET = 54321
+
+    @staticmethod
+    def _wire_fabric(
+        nodes: List[Node], net: NetworkConfig, rng: random.Random,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Two-tier switched network: hosts -> top-of-rack switches -> core routers.
+
+        Returns (network_devices, connects_to). Links run from the lower tier to
+        the higher one and carry their interfaces and, when configured, capacity.
+        """
+        hosts = [n.id for n in nodes]
+        rng.shuffle(hosts)
+        racks = [hosts[i:i + net.hosts_per_rack] for i in range(0, len(hosts), net.hosts_per_rack)]
+        cores = [f"RT{j}" for j in range(net.core_routers)] if len(racks) > 1 else []
+
+        def link(src: str, dst: str, src_if: str, dst_if: str, cap: Optional[float]) -> Dict[str, Any]:
+            edge: Dict[str, Any] = {"from": src, "to": dst, "from_interface": src_if, "to_interface": dst_if}
+            if cap is not None:
+                edge["capacity_mbps"] = cap
+            return edge
+
+        devices: List[Dict[str, Any]] = []
+        connects: List[Dict[str, Any]] = []
+        for i, rack in enumerate(racks):
+            tor = f"SW{i}"
+            devices.append({"id": tor, "name": f"tor-{i}", "role": "switch"})
+            for k, host in enumerate(sorted(rack)):
+                connects.append(link(host, tor, "eth0", f"port{k}", net.host_link_mbps))
+        for j, core in enumerate(cores):
+            devices.append({"id": core, "name": f"core-{j}", "role": "router"})
+        for i in range(len(racks)):
+            for j, core in enumerate(cores):
+                connects.append(link(f"SW{i}", core, f"uplink{j}", f"port{i}", net.uplink_mbps))
+        return devices, connects
+
     def _apply_post_topology(
         self,
         apps: List[Application],
@@ -1423,6 +1462,7 @@ class StatisticalGraphGenerator:
         subscribes: List[Dict[str, str]],
         connects: List[Dict[str, str]],
         uses: List[Dict[str, str]],
+        network_devices: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Serialize all entities/relationships and run schema validation."""
         graph_dict = {
@@ -1447,6 +1487,9 @@ class StatisticalGraphGenerator:
                 "uses": uses
             }
         }
+        if network_devices is not None:
+            graph_dict["metadata"]["network"] = c.network.to_dict()
+            graph_dict["network_devices"] = network_devices
         return validate_and_clean_schema(graph_dict)
 
     def generate(self) -> Dict[str, Any]:
@@ -1515,7 +1558,14 @@ class StatisticalGraphGenerator:
             c, apps, topics, app_id_to_cluster, cluster_to_topics,
             cluster_to_apps, topic_id_to_cluster, publishes, subscribes,
         )
+        # The mesh is always drawn, so the main RNG stream -- and with it every
+        # later draw -- is the same with or without a ``network:`` block.
         connects = self._wire_connects(nodes, c.connection_density)
+        network_devices = None
+        if c.network is not None:
+            network_devices, connects = self._wire_fabric(
+                nodes, c.network, random.Random(c.seed + self.FABRIC_SEED_OFFSET),
+            )
 
         publishes, subscribes = self._apply_post_topology(
             apps, topics, publishes, subscribes, criticality_pool,
@@ -1525,6 +1575,7 @@ class StatisticalGraphGenerator:
         return self._assemble(
             c, nodes, brokers, topics, apps, libs,
             runs_on, routes, publishes, subscribes, connects, uses,
+            network_devices=network_devices,
         )
 
 
@@ -1543,9 +1594,9 @@ def validate_and_clean_schema(graph_data: Dict[str, Any]) -> Dict[str, Any]:
 
     # 2. Collect all valid entity IDs to check for duplicates and dangling edges
     valid_ids = set()
-    categories = ["nodes", "brokers", "topics", "applications", "libraries"]
+    categories = ["nodes", "brokers", "topics", "applications", "libraries", "network_devices"]
     for category in categories:
-        for entity in graph_data[category]:
+        for entity in graph_data.get(category, []):
             entity_id = entity.get("id")
             if not entity_id:
                 raise ValueError(f"Entity in '{category}' is missing 'id' attribute: {entity}")

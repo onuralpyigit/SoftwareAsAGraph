@@ -81,6 +81,10 @@ class StructuralMetrics:
     max_connections: int = 0
     host: str = ""
 
+    # === Network Load (Node and NetworkDevice; 0.0 unless the topology models its network) ===
+    max_link_utilization: float = 0.0  # Worst offered-load / capacity_mbps over the vertex's CONNECTS_TO links
+    link_load_mbps: float = 0.0        # Baseline pub-sub traffic on the vertex's CONNECTS_TO links, Mbps
+
     # === Code Quality Metrics (Application and Library nodes only; 0.0 for all other types) ===
     # Populated from optional JSON fields (loc, cyclomatic_complexity, coupling_*, lcom).
     # Initialized with raw values during assembly, then min-max normalized by StructuralAnalyzer.
@@ -132,6 +136,7 @@ class StructuralMetrics:
             "Library": "diamond",
             "Broker": "hexagon",
             "Node": "box",
+            "NetworkDevice": "triangle",
             "Topic": "star",
         }
         return mapping.get(self.type, "ellipse")

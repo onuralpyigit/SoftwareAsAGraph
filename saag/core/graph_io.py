@@ -36,6 +36,7 @@ import logging
 import networkx as nx
 
 from saag.core.models import QoSPolicy, topic_weight_from_node_attrs
+from saag.core.network import LINK_PROPERTIES
 
 logger = logging.getLogger("saag.core.graph_io")
 
@@ -93,6 +94,7 @@ def build_graph_from_json(topology: Dict[str, Any]) -> nx.DiGraph:
         ("topics", "Topic"),
         ("nodes", "Node"),
         ("libraries", "Library"),
+        ("network_devices", "NetworkDevice"),
     ]
     for key, type_label in type_buckets:
         for entity in topology.get(key, []):
@@ -143,6 +145,8 @@ def build_graph_from_json(topology: Dict[str, Any]) -> nx.DiGraph:
                 # projection below can tell "unset" from "deliberately 1.0".
                 if r.get("weight") is not None:
                     attrs["weight"] = float(r["weight"])
+                if type_label == "CONNECTS_TO":
+                    attrs.update({k: r[k] for k in LINK_PROPERTIES if k in r})
                 g.add_edge(src, dst, **attrs)
 
     _project_topic_qos_onto_edges(g)
@@ -184,6 +188,7 @@ def load_graph(input_path: Path):
         # never match a --node-types filter and silently receive no ground
         # truth at all.
         ("libraries", "Library"),
+        ("network_devices", "NetworkDevice"),
     ):
         for entity in data.get(bucket, []):
             g.add_node(entity["id"], type=type_label,
@@ -239,7 +244,8 @@ def load_graph(input_path: Path):
         src = conn.get("source") or conn.get("from")
         tgt = conn.get("target") or conn.get("to")
         if src and tgt:
-            g.add_edge(src, tgt, type="CONNECTS_TO")
+            g.add_edge(src, tgt, type="CONNECTS_TO",
+                       **{k: conn[k] for k in LINK_PROPERTIES if k in conn})
 
     # 6. USES
     # Note: Important for library-mediated publishing/subscribing

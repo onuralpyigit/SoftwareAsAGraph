@@ -19,6 +19,7 @@ from saag.core.models import (
     MIN_TOPIC_WEIGHT, QoSPolicy,
     compute_effective_edge_weight, compute_harmonic_coupling, compute_lifted_edge_weight,
 )
+from saag.core.network import NETWORK_TYPES, Fabric, derive_node_to_device
 
 #: Component types that participate in messaging dependencies (Rules 1, 2, 5).
 #: Mirrors saag/infrastructure/memory_repo.py so the two derivations cannot drift.
@@ -26,6 +27,7 @@ MESSAGING_TYPES = ("Application", "Library")
 
 #: Maximum USES hops followed when resolving which Applications reach a Library.
 USES_CHAIN_DEPTH = 3
+
 
 class SimulationGraph:
     """
@@ -37,7 +39,8 @@ class SimulationGraph:
         - Topic -[ROUTES]-> Broker (or Broker -[ROUTES]-> Topic)
         - Application -[RUNS_ON]-> Node
         - Broker -[RUNS_ON]-> Node
-        - Node -[CONNECTS_TO]-> Node
+        - Node -[CONNECTS_TO]-> Node | NetworkDevice
+        - NetworkDevice -[CONNECTS_TO]-> NetworkDevice
     
     This domain model assumes data is loaded via an external mechanism (GraphData).
     """
@@ -66,6 +69,10 @@ class SimulationGraph:
         self._hosted_on: Dict[str, str] = {}                                       # comp -> node
         self._hosts: Dict[str, List[str]] = defaultdict(list)                      # node -> [comps]
         self._connections: Dict[str, List[Tuple[str, float]]] = defaultdict(list)  # node -> [(nodes, weight)]
+        self._net_adj: Dict[str, Set[str]] = defaultdict(set)                      # CONNECTS_TO, undirected
+        self._net_links: List[Tuple[str, str, Optional[float]]] = []               # (a, b, capacity_mbps)
+        self._runs_on_all: Dict[str, List[str]] = defaultdict(list)                # comp -> every host
+        self._fabric: Optional[Fabric] = None
         self._uses: Dict[str, List[str]] = defaultdict(list)                       # app/lib -> [libs]
         self._used_by: Dict[str, List[str]] = defaultdict(list)                    # lib -> [apps/libs]
         self._app_publishes: Dict[str, List[str]] = defaultdict(list)              # app -> [topics]
@@ -77,7 +84,7 @@ class SimulationGraph:
         # about. Consulted by the relationship accessors below.
         self._failed_edges: Set[Tuple[str, str]] = set()
 
-        #: Memoised DEPENDS_ON projection (Rules 1-6), built lazily by
+        #: Memoised DEPENDS_ON projection (Rules 1-7), built lazily by
         #: get_dependency_edges() and invalidated on load.
         self._dependency_edges: Optional[List[Tuple[str, str, float, str]]] = None
         
@@ -134,6 +141,7 @@ class SimulationGraph:
             tgt = edge.target_id if hasattr(edge, 'target_id') else edge.get('target')
             rel = edge.relation_type if hasattr(edge, 'relation_type') else edge.get('relation_type', 'UNKNOWN')
             weight = edge.weight if hasattr(edge, 'weight') else edge.get('weight', 1.0)
+            edge_props = getattr(edge, 'properties', None) or {}
             
             self.graph.add_edge(src, tgt, relation=rel, weight=weight)
             
@@ -155,14 +163,31 @@ class SimulationGraph:
             elif rel == "RUNS_ON":
                 self._hosted_on[src] = tgt
                 self._hosts[tgt].append(src)  # Hosts don't strictly need weight for these cascades
+                self._runs_on_all[src].append(tgt)
             elif rel == "CONNECTS_TO":
                 self._connections[src].append((tgt, weight))
+                self._net_adj[src].add(tgt)
+                self._net_adj[tgt].add(src)
+                self._net_links.append((src, tgt, edge_props.get("capacity_mbps")))
             elif rel == "USES":
                 self._uses[src].append(tgt)
                 self._used_by[tgt].append(src)
 
         self._dependency_edges = None
+        self._fabric = None
         self._build_app_topic_index()
+
+        # A switch/router carries the worst-case weight of the hosts depending on
+        # it (Rule 7). Derived here, never read off the analysis graph -- the same
+        # value the repositories assign in Phase 5b.
+        devices = [c for c in self.components.values() if c.type == "NetworkDevice"]
+        if devices:
+            dependents: Dict[str, List[float]] = defaultdict(list)
+            for src, tgt, _w, dep_type in self.get_dependency_edges():
+                if dep_type == "node_to_device":
+                    dependents[tgt].append(self.components[src].weight)
+            for dev in devices:
+                dev.weight = max(dependents.get(dev.id, []), default=MIN_TOPIC_WEIGHT)
 
     def _build_app_topic_index(self) -> None:
         """
@@ -278,6 +303,28 @@ class SimulationGraph:
         """Get nodes connected to a given node."""
         return [n[0] for n in self._connections.get(node_id, []) if self.is_active(n[0])]
     
+    def has_network(self) -> bool:
+        """Whether the topology declares any CONNECTS_TO link at all."""
+        return bool(self._net_adj)
+
+    def fabric(self) -> Fabric:
+        """The intact CONNECTS_TO graph over every host and switch/router.
+
+        Links are undirected: a cable carries traffic both ways whichever way
+        round the topology happens to list it. Failure state is applied by the
+        caller (``Fabric.islands`` / ``saag.core.network.evaluate``).
+        """
+        if self._fabric is None:
+            self._fabric = Fabric(
+                [cid for cid, c in self.components.items() if c.type in NETWORK_TYPES],
+                self._net_links,
+            )
+        return self._fabric
+
+    def get_all_hosts(self, comp_id: str) -> List[str]:
+        """Every node a component RUNS_ON (hot-standby components have several)."""
+        return self._runs_on_all.get(comp_id, [])
+
     def get_app_topics(self, app_id: str) -> Tuple[List[str], List[str]]:
         """
         Get topics an application publishes to and subscribes from.
@@ -413,7 +460,7 @@ class SimulationGraph:
 
         # Add all active non-Topic components as nodes
         for comp_id, comp in self.components.items():
-            if comp.state == ComponentState.ACTIVE and comp.type in ("Application", "Broker", "Node"):
+            if comp.state == ComponentState.ACTIVE and comp.type in ("Application", "Broker") + NETWORK_TYPES:
                 active_graph.add_node(comp_id)
         
         if len(active_graph) == 0:
@@ -521,11 +568,11 @@ class SimulationGraph:
         """
         Derive the whole DEPENDS_ON projection as (dependent, dependency, weight, type).
 
-        Implements Rules 1-6 of docs/graph-model.md §4.4 from this graph's own raw
+        Implements Rules 1-7 of docs/graph-model.md §4.4 from this graph's own raw
         structural indices. Derived here rather than read off the analysis graph:
         saag/simulation/ never consumes derived edges (see the module docstring and
         tests/test_independence_guarantee.py), so the projection is recomputed from
-        PUBLISHES_TO / SUBSCRIBES_TO / ROUTES / RUNS_ON / USES.
+        PUBLISHES_TO / SUBSCRIBES_TO / ROUTES / RUNS_ON / USES / CONNECTS_TO.
 
         Direction is dependent -> dependency, the reverse of data flow: if A publishes
         to a topic B subscribes to, B depends on A.
@@ -638,6 +685,14 @@ class SimulationGraph:
             for (node, broker), ws in node_broker.items()
         })
         edges.update(lifted)
+
+        # Rule 7 -- node_to_device: a host depends on every switch/router that
+        # separates it from a host it depends on. Nothing without NetworkDevices.
+        devices = [cid for cid, t in types.items() if t == "NetworkDevice"]
+        if devices:
+            node_deps = [(n1, n2, w) for (n1, n2, d), w in lifted.items() if d == "node_to_node"]
+            for (node, device), (w, _n) in derive_node_to_device(self.fabric(), devices, node_deps).items():
+                edges[(node, device, "node_to_device")] = w
 
         # Rule 5 -- app_to_lib: harmonic coupling between user and library.
         for src, libs in self._uses.items():

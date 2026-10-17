@@ -1,5 +1,5 @@
 """
-SimulationGraph's DEPENDS_ON projection (Rules 1-6, docs/graph-model.md §4.4).
+SimulationGraph's DEPENDS_ON projection (Rules 1-7, docs/graph-model.md §4.4).
 
 `saag/simulation/` never reads derived edges, so it re-derives the projection from
 raw structural edges. These tests pin that derivation to the authoritative one in
@@ -129,8 +129,53 @@ def test_rule6_colocated_brokers_are_bidirectional():
 # Parity with the authoritative derivation
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("scenario", PARITY_SCENARIOS)
-def test_derivation_matches_repository_edge_set(scenario):
+def test_rule7_hosts_depend_on_the_devices_that_separate_them():
+    """Rule 7 — a single core router is on every cross-rack path; redundant cores are not."""
+    def network(cores):
+        data = _empty_graph()
+        data["nodes"] = [{"id": h, "name": h} for h in ("H1", "H2")]
+        data["network_devices"] = [{"id": d, "name": d, "role": "switch"} for d in ("S1", "S2")]
+        data["network_devices"] += [{"id": r, "name": r, "role": "router"} for r in cores]
+        data["topics"] = [{"id": "T", "name": "T"}]
+        data["applications"] = [{"id": "P", "name": "P"}, {"id": "S", "name": "S"}]
+        rels = data["relationships"]
+        rels["publishes_to"] = [{"from": "P", "to": "T"}]
+        rels["subscribes_to"] = [{"from": "S", "to": "T"}]
+        rels["runs_on"] = [{"from": "P", "to": "H1"}, {"from": "S", "to": "H2"}]
+        rels["connects_to"] = [{"from": "H1", "to": "S1"}, {"from": "H2", "to": "S2"}]
+        rels["connects_to"] += [{"from": s, "to": r} for s in ("S1", "S2") for r in cores]
+        return _build(data)
+
+    single = network(["R1"])
+    assert {(s, t) for s, t, d in _arcs(single) if d == "node_to_device"} == {
+        ("H2", "S2"), ("H2", "R1"), ("H2", "S1"),
+    }
+    assert _weight_of(single, "H2", "R1", "node_to_device") == pytest.approx(
+        _weight_of(single, "H2", "H1", "node_to_node"))
+    # The router inherits the weight of the host that depends on it.
+    assert single.components["R1"].weight == pytest.approx(single.components["H2"].weight)
+
+    redundant = network(["R1", "R2"])
+    assert not {t for s, t, d in _arcs(redundant) if d == "node_to_device"} & {"R1", "R2"}
+    assert redundant.components["R1"].weight == pytest.approx(0.01)
+
+
+def test_device_weight_matches_repository():
+    """SimulationGraph re-derives device weights; they must equal the repository's Phase 5b."""
+    repo = MemoryRepository()
+    with open("data/network/atm_two_tier_system.json") as fh:
+        ModelGraphUseCase(repo).execute(json.load(fh), clear=True)
+    graph = SimulationGraph(repo.get_graph_data(include_raw=True))
+    repo.derive_dependencies()
+    for device in repo.data["network_devices"]:
+        assert graph.components[device["id"]].weight == pytest.approx(device["weight"])
+
+
+@pytest.mark.parametrize("path", [
+    *(f"data/scenarios/{s}_system.json" for s in PARITY_SCENARIOS),
+    "data/network/atm_two_tier_system.json",
+])
+def test_derivation_matches_repository_edge_set(path):
     """The simulation-side projection must agree arc-for-arc with MemoryRepository.
 
     Set equality on (dependent, dependency, type). Weights are deliberately allowed
@@ -138,7 +183,7 @@ def test_derivation_matches_repository_edge_set(scenario):
     see test_collapse_does_not_double_count_shared_topics.
     """
     repo = MemoryRepository()
-    with open(f"data/scenarios/{scenario}_system.json") as fh:
+    with open(path) as fh:
         ModelGraphUseCase(repo).execute(json.load(fh), clear=True)
 
     derived = _arcs(SimulationGraph(repo.get_graph_data(include_raw=True)))

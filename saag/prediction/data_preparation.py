@@ -136,12 +136,15 @@ from saag.core.models import (
     MAX_TOPIC_CRITICALITY_ORD,
     canonical_criticality,
 )
+from saag.core.network import NETWORK_TYPES, Fabric, NetworkState, baseline_load, link_key
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-NODE_TYPES: List[str] = ["Application", "Broker", "Topic", "Node", "Library"]
+# NetworkDevice is appended, not inserted: a graph without switches/routers
+# yields exactly the tensors and HGT metadata it did before it existed.
+NODE_TYPES: List[str] = ["Application", "Broker", "Topic", "Node", "Library", "NetworkDevice"]
 EDGE_TYPES: List[str] = [
     "PUBLISHES_TO",
     "SUBSCRIBES_TO",
@@ -203,6 +206,13 @@ TOPIC_RUNTIME_KEYS: List[str] = [
     "topic_qos_criticality_ord",   # 21 — QoS urgency ordinal {0=minimal…4=critical}
 ]
 
+# NetworkDevice-only extras (indices 18-19), from the baseline routing of the
+# pub-sub flows over CONNECTS_TO (saag.core.network.baseline_load).
+NETWORK_DEVICE_KEYS: List[str] = [
+    "link_utilization",    # 18 — worst offered-load / capacity over its links, clipped to [0, 1]
+    "transit_load_norm",   # 19 — traffic on its links, per-graph max-normalized over devices
+]
+
 # Ordinal mapping for Topic.criticality labels (5-level QoS urgency scale).
 # Separate from Application.criticality which is a bool (process-level ground truth).
 # Defined in saag.core.models so the simulation severity model can share it.
@@ -228,6 +238,7 @@ KEYS_BY_TYPE: Dict[str, List[str]] = {
     "Broker":      BASE_METRIC_KEYS + BROKER_EXTRA_KEYS,
     "Topic":       BASE_METRIC_KEYS + TOPIC_RUNTIME_KEYS,
     "Node":        BASE_METRIC_KEYS + NODE_INFRA_KEYS,
+    "NetworkDevice": BASE_METRIC_KEYS + NETWORK_DEVICE_KEYS,
 }
 
 NODE_TYPE_TO_DIM: Dict[str, int] = {
@@ -238,6 +249,22 @@ NODE_TYPE_TO_DIM: Dict[str, int] = {
                          #      log1p_frequency_norm, topic_qos_criticality_ord
     "Node":        20,   # +2: cpu_cores_norm, memory_gb_norm
 }
+
+#: Widths of node types that only exist when a topology models its network.
+#: Kept out of NODE_TYPE_TO_DIM on purpose: the baselines (models/baselines.py,
+#: reproduce/render_table.py) build one input projection per entry there, so
+#: adding a type to it would change their parameter counts -- and their
+#: initialisation draws -- even on graphs that do not contain it.
+OPTIONAL_NODE_TYPE_TO_DIM: Dict[str, int] = {
+    "NetworkDevice": 20,  # +2: link_utilization, transit_load_norm
+}
+
+
+def node_type_dim(node_type: str) -> int:
+    """Feature width of *node_type*, including the optional network types."""
+    return NODE_TYPE_TO_DIM.get(
+        node_type, OPTIONAL_NODE_TYPE_TO_DIM.get(node_type, len(BASE_METRIC_KEYS))
+    )
 
 # Base dims (unchanged): weight + path_count_norm + 7 type one-hot
 _EDGE_BASE_DIM = 2 + len(EDGE_TYPES)  # = 9
@@ -364,10 +391,40 @@ def _extract_qos_edge_features(
 
 # ── Infrastructure feature helpers ─────────────────────────────────────────────
 
+def _graph_network_load(graph: nx.DiGraph) -> Optional[Tuple[Fabric, NetworkState]]:
+    """Baseline routing of the pub-sub flows over CONNECTS_TO, or None.
+
+    None unless the graph models its network (a NetworkDevice, or a link with
+    ``capacity_mbps``), so device-free graphs keep exactly their old features.
+    """
+    vertices = [n for n, a in graph.nodes(data=True) if a.get("type") in NETWORK_TYPES]
+    links, pubs, subs, routers, hosts = [], {}, {}, {}, {}
+    for src, dst, attrs in graph.edges(data=True):
+        etype = attrs.get("type", "")
+        if etype == "CONNECTS_TO":
+            links.append((src, dst, attrs.get("capacity_mbps")))
+        elif etype == "PUBLISHES_TO":
+            pubs.setdefault(dst, []).append(src)
+        elif etype == "SUBSCRIBES_TO":
+            subs.setdefault(dst, []).append(src)
+        elif etype == "ROUTES":
+            routers.setdefault(dst, []).append(src)
+        elif etype == "RUNS_ON":
+            hosts.setdefault(src, []).append(dst)
+    has_devices = any(graph.nodes[v].get("type") == "NetworkDevice" for v in vertices)
+    if not (has_devices or any(cap is not None for _, _, cap in links)):
+        return None
+    return baseline_load(
+        vertices, links, pubs, subs, routers, hosts,
+        topic_attrs={n: a for n, a in graph.nodes(data=True) if a.get("type") == "Topic"},
+    )
+
+
 def _normalize_infra_features(
     graph: nx.DiGraph,
     structural_metrics: Optional[Dict[str, Dict[str, float]]] = None,
     qos_enabled: bool = True,
+    network: Optional[Tuple[Fabric, NetworkState]] = None,
 ) -> Dict[str, Dict[str, float]]:
     """Compute normalized infrastructure/runtime features per node.
 
@@ -378,6 +435,8 @@ def _normalize_infra_features(
     - Topic: log1p_frequency_norm (per-scenario z-score of log1p(Hz))
     - Topic: topic_qos_criticality_ord (ordinal 0–4 of the 5-level QoS label)
     - Library: library_uses_reach_norm, library_downstream_subs_norm (see below)
+    - NetworkDevice: link_utilization, transit_load_norm (from the baseline
+      routing of the pub-sub flows; *network* is computed here when not given)
 
     All values are normalized to [0, 1] via per-graph max, EXCEPT
     log1p_frequency_norm which uses z-score normalization limited to the
@@ -557,6 +616,17 @@ def _normalize_infra_features(
             "library_uses_reach_norm": library_reach.get(n, 0.0) / max_reach,
             "library_downstream_subs_norm": library_downstream.get(n, 0.0) / max_downstream,
         }
+
+    devices = [n for n, a in graph.nodes(data=True) if a.get("type") == "NetworkDevice"]
+    if devices:
+        fabric, state = network or _graph_network_load(graph)
+        loads = {d: state.vertex_load.get(d, 0.0) for d in devices}
+        max_load = max(loads.values(), default=1.0) or 1.0
+        for d in devices:
+            infra[d] = {
+                "link_utilization": min(1.0, state.max_util(d, fabric)),
+                "transit_load_norm": loads[d] / max_load,
+            }
     return infra
 
 
@@ -771,15 +841,17 @@ def networkx_to_hetero_data(
     # A DEPENDS_ON projection carries its native graph as graph["infra_source"]
     # (Amendment 9): the Library reach features need the USES / pub-sub edges the
     # projection no longer has.
+    infra_source = graph.graph.get("infra_source", graph)
+    network = _graph_network_load(infra_source)
     infra_features = _normalize_infra_features(
-        graph.graph.get("infra_source", graph), structural_metrics, qos_enabled=qos_enabled
+        infra_source, structural_metrics, qos_enabled=qos_enabled, network=network,
     )
 
     # ── 2. Build node feature tensors per type ────────────────────────────────
     for node_type in result.present_node_types:
         nodes = result.node_id_map[node_type]
         n = len(nodes)
-        dim = NODE_TYPE_TO_DIM.get(node_type, len(BASE_METRIC_KEYS))
+        dim = node_type_dim(node_type)
         feat_matrix = np.zeros((n, dim), dtype=np.float32)
 
         keys_to_use = KEYS_BY_TYPE.get(node_type, BASE_METRIC_KEYS)
@@ -897,6 +969,11 @@ def networkx_to_hetero_data(
 
         # ── Edge features: 16-d (base 9 + QoS decomposition 7) ───────────────
         weight = float(attrs.get("weight", 1.0))
+        if edge_type == "CONNECTS_TO" and network is not None:
+            # A network link's weight slot carries its baseline headroom
+            # (1 - utilisation): 1.0 for an unbounded link, as before.
+            util = network[1].link_util.get(link_key(src, dst))
+            weight = 1.0 - min(1.0, util) if util is not None else 1.0
         path_count_raw = float(attrs.get("path_count", 1) or 1)
         path_count_norm = math.log2(1.0 + path_count_raw) / math.log2(17.0)
         type_onehot = [0.0] * len(EDGE_TYPES)

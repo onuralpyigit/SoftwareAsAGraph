@@ -69,6 +69,7 @@ A generated graph contains five node types and six structural edge types.
 | `Library` | `L{n}` | Shared software library used by one or more applications |
 | `Broker` | `B{n}` | Message broker / DDS participant that routes topics |
 | `Node` (Infrastructure) | `N{n}` | Physical or virtual host running applications and brokers |
+| `NetworkDevice` (optional) | `SW{n}` / `RT{n}` | Top-of-rack switch / core router; generated only when the config has a `network:` block (§5.1) |
 | `Topic` | `T{n}` | Named communication channel carrying typed messages; includes size, QoS policies (reliability, durability, transport priority, deadline, history depth), frequency (Hz), and ground-truth criticality (`HIGH`, `MEDIUM`, `LOW`) |
 
 ### 3.2 Structural Edge Types
@@ -80,7 +81,7 @@ A generated graph contains five node types and six structural edge types.
 | `ROUTES` | Broker $\rightarrow$ Topic | Broker is responsible for routing this topic |
 | `RUNS_ON` | Application/Broker $\rightarrow$ Node | Component is deployed on this infrastructure node |
 | `USES` | Application/Library $\rightarrow$ Library | Component or library depends on this shared library (transitive chains also generated, 30% probability per library) |
-| `CONNECTS_TO` | Node $\rightarrow$ Node | Network link between infrastructure nodes (30% probability by default, `--connection-density`) |
+| `CONNECTS_TO` | Node $\rightarrow$ Node, or Node $\rightarrow$ switch $\rightarrow$ router | Network link (undirected cable). Default: random host mesh (30% probability per pair, `--connection-density`). With a `network:` block: a two-tier switched network whose links carry `from_interface`, `to_interface` and optionally `capacity_mbps` |
 
 These six edge types constitute the **structural graph $G_{\text{structural}}$**, which is used by the simulation stage (Step 5) to trace failure propagation. A separate **analysis graph $G_{\text{analysis}}$** is derived from $G_{\text{structural}}$ by computing `DEPENDS_ON` edges, which are used exclusively by Steps 2, 3, and 4 (analysis, prediction, and diagnosis). The separation ensures that prediction and simulation remain independent.
 
@@ -143,6 +144,12 @@ graph:
   domain: <string>             # Optional: av | iot | finance | healthcare | hub-and-spoke | microservices | enterprise | atm
   scenario: <string>           # Optional: same values, QoS mapping table
   connection_density: <float>  # Optional: probability of connects_to edges (default 0.3)
+  network:                     # Optional: switched network instead of the host mesh
+    topology: two_tier         #   hosts -> top-of-rack switches -> core routers
+    hosts_per_rack: <int>      #   default 4 (hosts are shuffled into racks)
+    core_routers: <int>        #   default 2; every switch uplinks to every core
+    host_link_mbps: <float>    #   optional host<->switch capacity (absent = unbounded)
+    uplink_mbps: <float>       #   optional switch<->router capacity
   intra_cluster_coupling: <float> # Optional: p_intra for cluster-biased sampling (default 0.65)
 
   counts:
@@ -225,7 +232,7 @@ Edges are constructed in dependency order because later steps consume earlier on
 3. **`RUNS_ON`** (brokers) — `_rewrite_broker_placement()`: places each broker on a node in the plurality cluster of the topics it routes, co-locating brokers with the apps they serve.
 4. **`USES`** and library-direct pub/sub — `_wire_uses()`: lib→lib transitive dependencies (30% chance per library), then, if configured, direct library `PUBLISHES_TO`/`SUBSCRIBES_TO` edges, then app→lib usage.
 5. **`PUBLISHES_TO`/`SUBSCRIBES_TO`** (apps) — `_wire_pubsub()` dispatches to one of four mutually-exclusive strategies (§5.1's priority order). All four apply cluster-biased sampling (`_sample_biased`, `p_intra` = `intra_cluster_coupling`) and QoS-affinity steering (`_qos_preferred_topics()`: gateway/controller apps draw from `RELIABLE`/`HIGH` topics first, sensors from `BEST_EFFORT`/`LOW`).
-6. **`CONNECTS_TO`** — `_wire_connects()`: probabilistic node mesh, guarded against a fully disconnected result.
+6. **`CONNECTS_TO`** — `_wire_connects()`: probabilistic node mesh, guarded against a fully disconnected result. With a `network:` block, `_wire_fabric()` then replaces the mesh with a two-tier switched network: hosts in racks of `hosts_per_rack` behind `SW{i}`, and every switch uplinked to every `RT{j}` (there are no cores when everything fits in one rack). The mesh is still drawn first, and the fabric uses its own RNG stream (`seed + 54321`). The output is therefore a **mesh twin**: identical to the same YAML without `network:`, except for `connects_to`, `network_devices` and `metadata.network`. See [`data/network/`](../data/network/) for an example, kept out of `data/scenarios/` so it doesn't join the evaluation corpus.
 7. **Post-topology passes** — `_apply_post_topology()`: guarantees every app has at least one pub/sub edge (isolated apps would otherwise inflate F1 scores trivially), then assigns 3-tier criticality (`HIGH`, `MEDIUM`, `LOW`) and correlated `hotstandby: bool` redundancy (with dual-node host placement) via `_assign_criticality_two_pass()`, now that the topology is known. Apps are ranked by a composite score — connected-topic QoS urgency (0.50, itself `0.6·w(t) + 0.4·Topic.criticality` blended as `0.55·max + 0.45·mean` over the app's pub/sub topics), operational `app_type` semantics (0.25: controller > gateway > processor > actuator > sensor > monitor), and normalised pub/sub degree (0.25) — plus a small seeded jitter to break ties. The tier counts come from the scenario's `app_criticality_distribution`, and `hotstandby` is granted to the top of the same ranking, so redundancy correlates with criticality by construction.
 
 ### 6.3 Code-Metrics Generation

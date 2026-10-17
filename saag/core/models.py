@@ -572,6 +572,11 @@ class Node(GraphEntity):
     pass
 
 @dataclass
+class NetworkDevice(GraphEntity):
+    """A switch or router that host Nodes reach each other through (CONNECTS_TO)."""
+    role: str = "switch"
+
+@dataclass
 class Topic(GraphEntity):
     """A named channel for message exchange with QoS policies.
 

@@ -122,6 +122,23 @@ def test_apply_policy_reallocation_duplicates_connects_to_in_both_directions(top
     assert ("NodeOther", "NodeMain_AppB") in connects
 
 
+def test_reallocation_clone_keeps_link_capacity_but_not_interfaces(topology):
+    """A new cable has the same capacity as the one it mirrors, on ports of its own."""
+    import copy
+    topology = copy.deepcopy(topology)
+    for conn in topology["relationships"]["connects_to"]:
+        conn.update({"capacity_mbps": 1000, "from_interface": "eth0", "to_interface": "port3"})
+    policy = PrescriptionPolicy(node_reallocations=[
+        NodeReallocation(component="AppB", from_node="NodeMain", to_node="NodeMain_AppB")
+    ])
+    clone_links = [c for c in apply_policy(topology, policy)["relationships"]["connects_to"]
+                   if "NodeMain_AppB" in (c["from"], c["to"])]
+    assert clone_links
+    for link in clone_links:
+        assert link["capacity_mbps"] == 1000
+        assert "from_interface" not in link and "to_interface" not in link
+
+
 def test_apply_policy_topic_split_rewrites_all_three_relationship_types(topology):
     policy = PrescriptionPolicy(topic_splits=[
         TopicSplit(topic="T1", publishers=["AppA", "AppB"], subscribers=["AppB"])

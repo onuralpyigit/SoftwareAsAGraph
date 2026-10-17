@@ -84,21 +84,27 @@ def _reallocate_nodes(mutated: Dict[str, Any], policy: PrescriptionPolicy) -> No
         nodes.append(clone)
 
     # Mirror the original host's CONNECTS_TO links so reachability is preserved.
+    # The clone gets links of the same capacity, but on new ports: interface
+    # names belong to the original cable.
     connects_to: List[Dict[str, Any]] = []
     for conn in relationships.get("connects_to", []):
         connects_to.append(conn)
+        carried = {k: v for k, v in conn.items()
+                   if k not in ("from", "to", "weight", "from_interface", "to_interface")}
         for new_node_id, source_node_id in clone_sources.items():
             if conn.get("from") == source_node_id:
                 connects_to.append({
                     "from": new_node_id,
                     "to": conn.get("to"),
                     "weight": conn.get("weight", 1.0),
+                    **carried,
                 })
             if conn.get("to") == source_node_id:
                 connects_to.append({
                     "from": conn.get("from"),
                     "to": new_node_id,
                     "weight": conn.get("weight", 1.0),
+                    **carried,
                 })
     relationships["connects_to"] = connects_to
 

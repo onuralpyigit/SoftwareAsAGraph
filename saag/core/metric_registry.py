@@ -106,6 +106,11 @@ METRIC_ROLES: Dict[str, FrozenSet[MetricRole]] = {
     "max_connections": frozenset({MetricRole.GNN_FEATURE, MetricRole.DESCRIPTIVE}),
     "host": frozenset({MetricRole.DESCRIPTIVE}),
 
+    # === Network load (Node/NetworkDevice; Phase 5c, saag.core.network) ===
+    # The GNN re-derives these from the raw graph (data_preparation), not from here.
+    "max_link_utilization": frozenset({MetricRole.DESCRIPTIVE}),
+    "link_load_mbps": frozenset({MetricRole.DESCRIPTIVE}),
+
     # === Code Quality (Application/Library only) ===
     "loc_norm": frozenset({MetricRole.SCORING, MetricRole.GNN_FEATURE}),  # feeds code_quality_penalty, weight 0.10
     "complexity_norm": frozenset({MetricRole.SCORING, MetricRole.GNN_FEATURE}),  # feeds code_quality_penalty, weight 0.35
