@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     # Import-time only: pulling saag.prescription in eagerly would drag the
     # validation stack (and numpy) into every `import saag`.
     from saag.prescription.models import PrescribeResult
+    from saag.deployment.models import DeploymentResult
 
 class Client:
     """
@@ -326,6 +327,19 @@ class Client:
             gnn_checkpoint=gnn_checkpoint,
             **kwargs,
         )
+
+    def deploy(self, spec: Any, **kwargs: Any) -> "DeploymentResult":
+        """Plan a pre-deployment application-to-node mapping and verify it.
+
+        ``spec`` is a deployment spec (path, dict or DeploymentSpec). ``kwargs``
+        is forwarded to ``DeploymentService.optimize`` (solver limits, front
+        points, baselines, seeds, kappa, network_gating). Nothing is deployed
+        and the repository is not modified.
+        """
+        from saag.deployment.service import DeploymentService
+        from saag.usecases.deploy_graph import DeployGraphUseCase
+
+        return DeployGraphUseCase(DeploymentService(self.repo)).execute(spec, **kwargs)
 
     def visualize(self, output: str = "report.html", layers: Optional[List[str]] = None, **kwargs) -> str:
         """Render the logic to an HTML report."""

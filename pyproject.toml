@@ -49,6 +49,7 @@ saag-predict    = "cli.predict_graph:main"
 saag-diagnose   = "cli.diagnose_graph:main"
 saag-import     = "cli.import_graph:main"
 saag-generate   = "cli.generate_graph:main"
+saag-deploy     = "cli.deploy_graph:main"
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]

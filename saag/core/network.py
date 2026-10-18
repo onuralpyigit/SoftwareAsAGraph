@@ -116,6 +116,10 @@ class Fabric:
                     stack.append(nxt)
         return island
 
+    def hops(self, src: str, down: Iterable[str] = (), cut: Iterable[Link] = ()) -> Dict[str, int]:
+        """Hop count from *src* to every vertex it can reach."""
+        return self._shortest_dag(src, set(down), set(cut))[0]
+
     def _shortest_dag(self, src: str, down: Set[str], cut: Set[Link]):
         """BFS distances and shortest-path counts from *src*."""
         dist, sigma = {src: 0}, {src: 1}

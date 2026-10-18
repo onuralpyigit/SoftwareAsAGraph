@@ -495,6 +495,62 @@ PYTHONPATH=. python reproduce/run_prescribe_all.py --kappa 1.0 --output results/
 
 ---
 
+## Pre-deployment: Deploy
+
+**Script:** `cli/deploy_graph.py` (console script `saag-deploy`)
+**Purpose:** Plan an application-to-node deployment from a deployment spec and verify every
+candidate on the replica-aware failure simulator. It plans only; nothing is deployed. See
+[deployment.md](deployment.md).
+
+```bash
+saag-deploy -i data/network/atm_two_tier_system.json \
+    --spec data/deployment/atm_two_tier_deployment.yaml \
+    -o output/deployment.json --placed-topology output/placed.json
+
+# As a pipeline stage
+saag -i data/scenarios/atm_system.json --deploy --deployment-spec data/deployment/atm_system_deployment.json
+```
+
+### Arguments
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--spec` / `-s` | *(required)* | Deployment spec, YAML or JSON ([format](deployment.md#2-deployment-spec)) |
+| `--input` / `-i` | `None` | Run against a topology JSON in memory instead of Neo4j |
+| `--front-points` | `5` | Points on the traffic-vs-blast front |
+| `--ties` | `5` | Extra placements tied at minimum blast, used to measure solver-pick noise |
+| `--balance` | `False` | Break remaining ties toward lower peak utilisation |
+| `--time-limit` | `60` | Seconds per MILP solve |
+| `--time-budget` | `600` | Seconds for all MILP solves together |
+| `--max-nonzeros` | `2000000` | Model size above which `--solver auto` uses the heuristic |
+| `--solver` | `auto` | `auto` (MILP, heuristic fallback), `milp` or `heuristic` |
+| `--baselines` | all four | Any of `random ffd k8s_spread indeg_spread` (`indeg_spread` is always scored) |
+| `--seeds` | `42 123 456` | Failure-simulator seeds for the held-out score |
+| `--kappa` | `1.0` | Noise-bar multiple of the seed standard deviation |
+| `--network-gating` | `auto` | `auto` (on when the topology has NetworkDevices), `on` or `off` |
+| `--output` / `-o` | `None` | Write the full `DeploymentResult` JSON |
+| `--placed-topology` | `None` | Write the topology with the recommended placement applied (importable with `saag-import`) |
+
+`cli/run.py` adds `--deploy` and `--deployment-spec FILE`. `--deploy` without a spec is an
+error, and `--all` includes the stage only when `--deployment-spec` is given.
+
+### Output
+
+The CLI prints a candidate table with these columns: traffic, cross-host share, expected and
+worst-case blast proxy, peak utilisation, hosts used, held-out `I_comp` expected ± σ and
+worst case, and the verdict against the best baseline. It then prints the recommendation and
+its rationale, and says whether a reliability gain is claimed.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Error |
+| `2` | The spec is invalid or cannot be satisfied (with prechecks and culprit constraints) |
+
+---
+
 ## Step 8: Visualize
 
 **Script:** `cli/visualize_graph.py`  

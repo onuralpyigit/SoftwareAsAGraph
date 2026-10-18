@@ -43,6 +43,13 @@ def test_islands_respect_down_vertices_and_cut_links():
     assert isl["H3"] != isl["H1"]
 
 
+def test_hops_counts_shortest_paths_and_skips_down_vertices():
+    f = _two_racks(cores=("R1", "R2"))
+    hops = f.hops("H1")
+    assert hops["H1"] == 0 and hops["H2"] == 2 and hops["H3"] == 4
+    assert "H3" not in f.hops("H1", down={"R1", "R2"})
+
+
 def test_ecmp_splits_evenly_over_two_cores():
     f = _two_racks(cores=("R1", "R2"))
     shares = f.ecmp_shares("H1", "H3", set(), set())

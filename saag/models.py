@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     # Import-time only: saag.prescription's package init pulls in the whole
     # Analyze/Predict/Simulate/Validate stack the evaluator runs.
     from saag.prescription.models import PrescribeResult
+    from saag.deployment.models import DeploymentResult
 
 
 def _rm_components_to_facades(components) -> List["ComponentFacade"]:
@@ -486,6 +487,7 @@ class PipelineExecutionResult:
       simulation   — Simulate stage (Step 5: counterfactual cascade ground truth)
       validation   — Validate stage (Step 6: Predict/Diagnose vs Simulate ground truth)
       prescription — Prescribe stage (Step 7 optimization); optional
+      deployment   — pre-deployment planning (application-to-node mapping); optional
     """
     analysis: Optional[AnalysisResult] = None
     prediction: Optional[PredictionResult] = None
@@ -494,6 +496,7 @@ class PipelineExecutionResult:
     simulation: Optional[Any] = None
     validation: Optional[ValidationPipelineFacade] = None
     prescription: Optional["PrescribeResult"] = None
+    deployment: Optional["DeploymentResult"] = None
 
     def save(self, filepath: str) -> None:
         """Export the full pipeline result to a JSON file."""
@@ -528,6 +531,8 @@ class PipelineExecutionResult:
                 data["prescription"] = self.prescription.to_dict()
             else:
                 data["prescription"] = self.prescription
+        if self.deployment:
+            data["deployment"] = self.deployment.to_dict()
         with out.open("w") as f:
             json.dump(data, f, indent=2, default=str)
 class ImportResult:

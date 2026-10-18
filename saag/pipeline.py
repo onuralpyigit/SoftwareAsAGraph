@@ -2,7 +2,7 @@
 saag/pipeline.py
 """
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from .client import Client
 from .models import PipelineExecutionResult
@@ -41,6 +41,7 @@ class Pipeline:
         self._triage_kwargs: dict = {}
         self._simulate_kwargs: dict = {}
         self._visualize_kwargs: dict = {}
+        self._deploy_kwargs: dict = {}
         self._clear: bool = False
         self._validate_layers: Optional[List[str]] = None
 
@@ -51,6 +52,7 @@ class Pipeline:
         self._do_simulate = False
         self._do_validate = False
         self._do_prescribe = False
+        self._do_deploy = False
         self._do_visualize = False
 
     @staticmethod
@@ -208,6 +210,17 @@ class Pipeline:
         self._do_prescribe = True
         return self
 
+    def deploy(self, spec: Any, **kwargs: Any) -> "Pipeline":
+        """Pre-deployment planning: map Applications and Brokers to Nodes under *spec*.
+
+        Independent of the other stages (it reads only the topology). ``kwargs``
+        is forwarded to ``DeploymentService.optimize``. It plans; nothing is
+        deployed.
+        """
+        self._do_deploy = True
+        self._deploy_kwargs = {"spec": spec, **kwargs}
+        return self
+
     def visualize(self, output: str = "report.html", layers: Optional[List[str]] = None, **kwargs) -> "Pipeline":
         """Stage 8: Generate HTML dashboard report."""
         self._do_visualize = True
@@ -327,6 +340,12 @@ class Pipeline:
                 layer=self._layer,
                 gnn_checkpoint=gnn_checkpoint
             )
+
+        # Pre-deployment planning — reads only the topology
+        if self._do_deploy:
+            logger.info("Running pre-deployment planning...")
+            kwargs = dict(self._deploy_kwargs)
+            result.deployment = self.client.deploy(kwargs.pop("spec"), **kwargs)
 
         # Execution step 7 (Stage 8: Visualize)
         if self._do_visualize:

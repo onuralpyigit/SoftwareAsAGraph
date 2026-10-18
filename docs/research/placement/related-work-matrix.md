@@ -10,6 +10,12 @@ availability and fault tolerance **before deployment**.
 > the full text and promote it to ✅ in the *Verified* column. Not finding a gap in this
 > pass does **not** mean the gap exists (see [§5](#5-open-verification-tasks)).
 
+> **Product (2026-10-19).** The engineering half of this study ships as the pre-deployment
+> planning stage ([docs/deployment.md](../../deployment.md), `saag-deploy`): an exact MILP for
+> capacity, replicas, anti-affinity, deadlines and traffic, verified on the held-out
+> replica-aware simulator, with no reliability claim unless the simulator confirms one beyond
+> noise.
+
 ---
 
 ## 1. Matrix
