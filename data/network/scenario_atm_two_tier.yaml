@@ -1,0 +1,209 @@
+# =============================================================================
+# Network example — ATM (scenario 10) on a two-tier switched network
+# =============================================================================
+# Same system as data/scenarios/scenario_10_atm_system.yaml, except that the
+# host-to-host CONNECTS_TO mesh is replaced by a switched network: the 8 hosts
+# sit in two racks of four behind top-of-rack switches SW0/SW1, and each switch
+# uplinks to both core routers RT0/RT1 (docs/graph-generation.md, `network:`).
+# Every other entity and relationship is identical to the corpus dataset (the
+# fabric draws from its own RNG stream).
+#
+# Capacities are chosen to bind on failover, not at baseline: each uplink
+# carries ~20 Mbps of the system's pub-sub traffic while both cores are up
+# (utilisation ~0.66 at 30 Mbps) and ~40 Mbps when one core fails, so losing a
+# core congests the surviving uplinks.
+#
+# Lives outside data/scenarios/ on purpose: the evaluation corpus and the
+# reproduction sweeps glob that directory, and this example is not part of them.
+#
+# Usage:
+#   PYTHONPATH=. python cli/generate_graph.py --config data/network/scenario_atm_two_tier.yaml \
+#          --output data/network/atm_two_tier_system.json
+# =============================================================================
+
+graph:
+  seed: 42
+  domain: air_traffic_management
+  scenario: icao_global_atm_concept
+
+  counts:
+    nodes: 8
+    applications: 26
+    libraries: 8
+    topics: 27
+    brokers: 5
+
+  # ---------------------------------------------------------------------------
+  # NODE STATISTICS
+  # ---------------------------------------------------------------------------
+  node_stats:
+    applications_per_node:
+      mean: 3.25
+      median: 3.0
+      std: 1.5
+      min: 1
+      max: 8
+      q1: 2.0
+      q3: 4.0
+      iqr: 2.0
+
+  # ---------------------------------------------------------------------------
+  # APPLICATION STATISTICS
+  # ---------------------------------------------------------------------------
+  application_stats:
+    direct_publish_count:
+      mean: 1.2
+      median: 1.0
+      std: 0.8
+      min: 0
+      max: 3
+      q1: 1.0
+      q3: 2.0
+      iqr: 1.0
+
+    direct_subscribe_count:
+      mean: 2.9
+      median: 2.0
+      std: 1.5
+      min: 0
+      max: 6
+      q1: 2.0
+      q3: 4.0
+      iqr: 2.0
+
+    total_publish_count_including_libraries:
+      mean: 2.0
+      median: 2.0
+      std: 1.0
+      min: 0
+      max: 4
+      q1: 1.0
+      q3: 3.0
+      iqr: 2.0
+
+    total_subscribe_count_including_libraries:
+      mean: 4.0
+      median: 3.0
+      std: 2.0
+      min: 0
+      max: 8
+      q1: 3.0
+      q3: 5.0
+      iqr: 2.0
+
+    app_role_distribution:
+      total_count: 26
+      category_counts:
+        pub: 5
+        sub: 2
+        pubsub: 19
+      mode: pubsub
+      mode_count: 19
+      mode_percentage: 73.0
+
+    app_criticality_distribution:
+      total_count: 26
+      category_counts:
+        HIGH: 12
+        MEDIUM: 10
+        LOW: 4
+      mode: HIGH
+      mode_count: 12
+      mode_percentage: 46.15
+
+    # Application hotstandby redundancy distribution (Categorical)
+    # Values: true (multi-node redundant active/standby), false (standalone)
+    app_hotstandby_distribution:
+      total_count: 26
+      category_counts:
+        true: 14
+        false: 12
+      mode: true
+      mode_count: 14
+      mode_percentage: 53.85
+
+  # ---------------------------------------------------------------------------
+  # LIBRARY STATISTICS
+  # ---------------------------------------------------------------------------
+  library_stats:
+    applications_using_this_library:
+      mean: 4.0
+      median: 3.0
+      std: 2.0
+      min: 1
+      max: 10
+      q1: 2.0
+      q3: 6.0
+      iqr: 4.0
+
+  # ---------------------------------------------------------------------------
+  # TOPIC STATISTICS
+  # ---------------------------------------------------------------------------
+  topic_stats:
+    topic_size_bytes:
+      mean: 1262.0
+      median: 512.0
+      std: 1500.0
+      min: 32
+      max: 8192
+      q1: 256.0
+      q3: 2048.0
+      iqr: 1792.0
+
+    applications_publishing_to_this_topic:
+      mean: 1.2
+      median: 1.0
+      std: 0.5
+      min: 1
+      max: 3
+
+    applications_subscribing_to_this_topic:
+      mean: 2.8
+      median: 2.0
+      std: 1.5
+      min: 1
+      max: 8
+
+  # ---------------------------------------------------------------------------
+  # QOS STATISTICS
+  # ---------------------------------------------------------------------------
+  qos_stats:
+    qos_durability_distribution:
+      total_count: 27
+      category_counts:
+        volatile: 16
+        transient_local: 8
+        persistent: 3
+      mode: volatile
+      mode_count: 16
+      mode_percentage: 59.2
+
+    qos_reliability_distribution:
+      total_count: 27
+      category_counts:
+        best_effort: 5
+        reliable: 22
+      mode: reliable
+      mode_count: 22
+      mode_percentage: 81.4
+
+    qos_transport_priority_distribution:
+      total_count: 27
+      category_counts:
+        low: 3
+        medium: 9
+        high: 11
+        critical: 4
+      mode: high
+      mode_count: 11
+      mode_percentage: 40.7
+
+  # ---------------------------------------------------------------------------
+  # PHYSICAL NETWORK
+  # ---------------------------------------------------------------------------
+  network:
+    topology: two_tier
+    hosts_per_rack: 4
+    core_routers: 2
+    host_link_mbps: 100
+    uplink_mbps: 30

@@ -14,7 +14,8 @@ Cascade Rules:
     - Physical: Node failure -> hosted components fail (RUNS_ON)
     - Logical: Broker failure -> topics become unreachable;
                Publisher failure -> subscriber starvation
-    - Network: Network partition via CONNECTS_TO
+    - Network: Network partition via CONNECTS_TO (or, with ``network_gating``,
+               pub-sub delivery gated on host reachability across switches/routers)
     - Library: Library failure -> using applications fail (USES)
 """
 
@@ -28,7 +29,8 @@ from typing import Dict, List, Set, Tuple, Any, Optional
 from enum import Enum
 from collections import defaultdict
 
-from .graph import SimulationGraph
+from .graph import SimulationGraph, NETWORK_TYPES
+from saag.core.network import evaluate, link_key, topic_load_mbps
 from .models import ComponentState, FailureMode, CascadeRule, FailureScenario, ImpactMetrics, CascadeEvent, FailureResult, MonteCarloResult, RuntimeTelemetryProfile
 from saag.core.models import TOPIC_CRITICALITY_ORD, MAX_TOPIC_CRITICALITY_ORD
 
@@ -68,6 +70,60 @@ class _CascadeState:
     cascade_sequence: List[CascadeEvent]
     #: BFS frontier of (component_id, depth).
     queue: List[Tuple[str, int]] = field(default_factory=list)
+
+
+#: Component types counted as "infrastructure that can be up or down" by the
+#: fragmentation and failed-component terms.
+_COUNTED_TYPES: Tuple[str, ...] = ("Application", "Broker") + NETWORK_TYPES
+
+
+class _NetworkView:
+    """What the physical network still delivers, for one graph state.
+
+    Routes every live pub-sub flow over the live CONNECTS_TO fabric
+    (``saag.core.network.evaluate``): a flow with no path is blocked, and when
+    links declare ``capacity_mbps`` a flow crossing an over-subscribed link
+    loses the excess. A component without a host is not on the network, so the
+    network is never the reason its deliveries fail.
+    """
+
+    def __init__(self, graph: SimulationGraph):
+        self.graph = graph
+        fabric = graph.fabric()
+        down = {v for v in fabric.vertices if not graph.is_active(v)}
+        cut = {link_key(a, b) for a, b in graph._failed_edges
+               if link_key(a, b) in fabric.capacity}
+        flows, topics = [], []
+        for topic_id in graph.topics:
+            subs = graph.get_subscribers(topic_id)
+            pubs = graph.get_publishers(topic_id)
+            if pubs and subs:
+                topics.append(topic_id)
+                flows += [(p, topic_id, s) for p in pubs for s in subs if p != s]
+        self.state = evaluate(
+            fabric, flows, graph._runs_on_all,
+            live_routers={t: graph.get_routing_brokers(t) for t in topics},
+            brokered=[t for t in topics if graph.has_configured_brokers(t)],
+            topic_load={t: topic_load_mbps(graph.components[t].properties) for t in topics},
+            down=down, cut=cut, with_load=fabric.has_capacity,
+        )
+
+    def loss(self, pub_id: str, topic_id: str, sub_id: str) -> float:
+        """Undelivered fraction of one flow due to the network (1.0 = no path)."""
+        return self.state.flow_loss.get((pub_id, topic_id, sub_id), 0.0)
+
+    def blocks(self, pub_id: str, topic_id: str, sub_id: str) -> bool:
+        """Is the network what stops *pub_id*'s messages on *topic_id* reaching *sub_id*?
+
+        A brokered topic with no live broker is not blocked *by the network* --
+        that loss belongs to the logical cascade.
+        """
+        return self.loss(pub_id, topic_id, sub_id) >= 1.0
+
+    def cut_off(self, topic_id: str, sub_id: str) -> bool:
+        """*topic_id* is still produced and routed, but not to *sub_id*'s island."""
+        pubs = self.graph.get_publishers(topic_id)
+        return bool(pubs) and all(self.blocks(p, topic_id, sub_id) for p in pubs)
 
 
 #: ImpactMetrics fields averaged as floats vs. rounded to nearest int when
@@ -127,7 +183,7 @@ class FailureSimulator:
 
     def __init__(self, graph: SimulationGraph, telemetry_profile: Optional[RuntimeTelemetryProfile] = None,
                  propagation_threshold: float = 0.2, qos_weighting: bool = True,
-                 use_topic_criticality: bool = False):
+                 use_topic_criticality: bool = False, network_gating: bool = False):
         """
         Initialize the failure simulator.
 
@@ -148,13 +204,28 @@ class FailureSimulator:
                 feature, so enabling it makes the label a function of a feature. Only
                 turn it on as an explicit, separately-reported ablation arm — and drop
                 topic_qos_criticality_ord from KEYS_BY_TYPE if you do.
+            network_gating: Count a pub-sub delivery as live only while the CONNECTS_TO
+                network (hosts, switches, routers) still carries it from publisher via a
+                routing broker to subscriber. Unreachable subscribers starve, replacing
+                the host-to-host isolation rule of the NETWORK cascade; where links
+                declare ``capacity_mbps``, flows rerouted onto an over-subscribed link
+                lose the excess in the reachability, throughput and flow-disruption
+                terms (relative to the healthy baseline). Off by default; a no-op on
+                topologies without CONNECTS_TO links.
         """
         self.graph = graph
         self.telemetry = telemetry_profile or RuntimeTelemetryProfile()
         self.propagation_threshold = propagation_threshold
         self.qos_weighting = qos_weighting
         self.use_topic_criticality = use_topic_criticality
+        self.network_gating = network_gating
         self.logger = logging.getLogger(__name__)
+        if not network_gating and any(c.type == "NetworkDevice" for c in graph.components.values()):
+            self.logger.warning(
+                "Topology models switches/routers but network_gating is off: their "
+                "failures only score fragmentation. Pass network_gating=True to route "
+                "deliveries over CONNECTS_TO."
+            )
         
         # Random generator
         self._rng = random.Random()
@@ -170,6 +241,8 @@ class FailureSimulator:
         self._initial_capacity_sum: float = 0.0
         self._initial_components: int = 0
         self._baseline_flows: Set[Tuple[str, str, str]] = set()
+        # Network loss of each flow in the healthy state (network gating only).
+        self._baseline_net_loss: Dict[Tuple[str, str, str], float] = {}
         self._initial_stranded_severity: float = 0.0
         self._baseline_computed: bool = False
         # Cached impact of removing nothing; edge deltas subtract it.
@@ -800,15 +873,46 @@ class FailureSimulator:
             trial_impacts=impacts,
         )
     
+    def _network_view(self) -> Optional[_NetworkView]:
+        """Network delivery over the current graph state, or None when gating is off."""
+        if not (self.network_gating and self.graph.has_network()):
+            return None
+        return _NetworkView(self.graph)
+
+    def _network_loss(self, net: Optional[_NetworkView], pub_id: str, topic_id: str, sub_id: str) -> float:
+        """Share of a flow's *baseline* delivery the network no longer carries.
+
+        Relative to the healthy state, so a link that is already over-subscribed
+        before any failure is not charged to every component: a flow that got
+        60% through at baseline and 30% now has lost half of it. A flow the
+        network could not carry even at baseline is outside the measurement.
+        """
+        if net is None:
+            return 0.0
+        base = self._baseline_net_loss.get((pub_id, topic_id, sub_id), 0.0)
+        if base >= 1.0:
+            return 1.0
+        return min(1.0, max(0.0, 1.0 - (1.0 - net.loss(pub_id, topic_id, sub_id)) / (1.0 - base)))
+
+    def _live_weighted_paths(self, net: Optional[_NetworkView]) -> List[Tuple[str, str, str, float]]:
+        """Weighted pub-sub paths, scaled by what the network still carries of each."""
+        paths = self.graph.get_weighted_pub_sub_paths(active_only=True)
+        if net is None:
+            return paths
+        scaled = [(p, t, s, w * (1.0 - self._network_loss(net, p, t, s))) for p, t, s, w in paths]
+        return [path for path in scaled if path[3] > 0.0]
+
     def _compute_baseline(self) -> None:
         """Compute and cache baseline metrics from the current (healthy) graph state."""
-        self._initial_paths_list = self.graph.get_weighted_pub_sub_paths(active_only=True)
+        net = self._network_view()
+        self._baseline_net_loss = dict(net.state.flow_loss) if net is not None else {}
+        self._initial_paths_list = self._live_weighted_paths(net)
         self._initial_paths = len(self._initial_paths_list)
         self._initial_capacity_sum = sum(p[3] for p in self._initial_paths_list)
         
         self._initial_components = len([
             c for c in self.graph.components.values()
-            if c.type in ("Application", "Broker", "Node") and c.state == ComponentState.ACTIVE
+            if c.type in _COUNTED_TYPES and c.state == ComponentState.ACTIVE
         ])
         self._initial_connected_components = self.graph.count_active_connected_components()
         self._initial_total_weight = self._compute_total_topic_weight()
@@ -1000,6 +1104,33 @@ class FailureSimulator:
                 self._apply_impact(state, neighbor_id, isolation_impact,
                                    f"network_partition:{current_id}", depth + 1)
 
+    def _cut_at_baseline(self, topic_id: str, sub_id: str) -> bool:
+        pubs = self.graph._publishers.get(topic_id, [])
+        return bool(pubs) and all(
+            self._baseline_net_loss.get((p, topic_id, sub_id), 0.0) >= 1.0 for p, _w in pubs
+        )
+
+    def _cascade_network_reachability(self, scenario, state, current_id, current_impact, depth) -> None:
+        """With network gating: starve subscribers the network has cut off.
+
+        Same min-across-feeds rule as topic starvation — one feed that still
+        arrives keeps the subscriber alive — but a feed counts as lost when its
+        topic is still produced and routed, just not to this subscriber's island.
+        """
+        net = self._network_view()
+        if net is None:
+            return
+        for sub_id, feeds in self.graph._app_subscribes.items():
+            if not feeds or not self.graph.is_active(sub_id):
+                continue
+            # A feed the healthy network never delivered is not this failure's doing.
+            cut = [net.cut_off(t, sub_id) and not self._cut_at_baseline(t, sub_id) for t in feeds]
+            if not any(cut):
+                continue
+            sub_impact = min(1.0 if c else state.impact.get(t, 0.0) for t, c in zip(feeds, cut))
+            self._apply_impact(state, sub_id, sub_impact,
+                               f"network_unreachable:{current_id}", depth + 1)
+
     def _propagate_cascade_multi(
         self,
         scenario: FailureScenario,
@@ -1080,20 +1211,25 @@ class FailureSimulator:
                 elif current_type == "Topic":
                     self._cascade_topic_to_subscriber(*args)
 
-            if network_rule and current_type == "Node":
+            if network_rule and self.network_gating and current_type in NETWORK_TYPES:
+                self._cascade_network_reachability(*args)
+            elif network_rule and current_type == "Node":
                 self._cascade_network(*args)
 
         return max_depth
 
-    def _impact_reachability(self) -> Tuple[int, float]:
+    def _impact_reachability(self, net: Optional[_NetworkView] = None) -> Tuple[int, float]:
         """Weighted pub-sub path capacity still available. Returns (paths, loss)."""
-        weighted_paths = self.graph.get_weighted_pub_sub_paths(active_only=True)
+        weighted_paths = self._live_weighted_paths(net)
         remaining_capacity_sum = sum(p[3] for p in weighted_paths)
 
         if self._initial_capacity_sum > 0:
             loss = 1.0 - (remaining_capacity_sum / self._initial_capacity_sum)
         else:
             loss = 0.0
+        if net is not None:
+            # Rerouting can relieve a link that was congested at baseline.
+            loss = max(0.0, loss)
         return len(weighted_paths), loss
 
     def _impact_fragmentation(self) -> Tuple[int, float]:
@@ -1127,7 +1263,7 @@ class FailureSimulator:
             )
         return final_cc, fragmentation
 
-    def _impact_throughput(self) -> Tuple[float, float, int]:
+    def _impact_throughput(self, net: Optional[_NetworkView] = None) -> Tuple[float, float, int]:
         """
         QoS-weighted delivery capacity lost. Returns (lost_weight, loss, topics).
 
@@ -1155,6 +1291,14 @@ class FailureSimulator:
                     1.0 - (len(live_brokers) / len(all_brokers)) if all_brokers else 0.0
                 )
                 topic_loss = max(pub_loss, broker_loss)
+                if net is not None and live_pubs:
+                    # Produced and routed, but the network no longer carries all of
+                    # it to the live subscribers (unreachable or congested).
+                    feed_loss = [
+                        statistics.mean(self._network_loss(net, p, topic_id, s) for p in live_pubs)
+                        for s in live_subs
+                    ]
+                    topic_loss = max(topic_loss, statistics.mean(feed_loss))
 
             if topic_loss > 1e-9:
                 lost_weight += self.topic_severity(topic_id) * topic_loss
@@ -1212,7 +1356,7 @@ class FailureSimulator:
 
         return len(affected_pubs), len(affected_subs)
 
-    def _impact_flow_disruption(self) -> float:
+    def _impact_flow_disruption(self, net: Optional[_NetworkView] = None) -> float:
         """
         FD(v): the share of baseline message flows that no longer complete.
 
@@ -1238,6 +1382,8 @@ class FailureSimulator:
             brokers = self.graph.get_routing_brokers(topic_id)
             if not endpoints_up or not any(self.graph.is_active(b) for b in brokers):
                 broken_weight += severity
+            elif net is not None:
+                broken_weight += severity * self._network_loss(net, pub_id, topic_id, sub_id)
 
         return broken_weight / total_flow_weight if total_flow_weight > 0 else 0.0
 
@@ -1252,15 +1398,16 @@ class FailureSimulator:
         Each term is computed by its own helper; this method only wires them
         into the result. Reachability and throughput are QoS-weighted.
         """
-        remaining_paths, reachability_loss = self._impact_reachability()
+        net = self._network_view()
+        remaining_paths, reachability_loss = self._impact_reachability(net)
         final_cc, fragmentation = self._impact_fragmentation()
-        lost_weight, throughput_loss, affected_topics = self._impact_throughput()
+        lost_weight, throughput_loss, affected_topics = self._impact_throughput(net)
         ia_out, ia_in = self._impact_directed(target_id, failed_set)
         affected_publishers, affected_subscribers = self._impact_affected_sets()
 
         remaining_active = len([
             c for c in self.graph.components.values()
-            if c.type in ("Application", "Broker", "Node")
+            if c.type in _COUNTED_TYPES
             and c.state == ComponentState.ACTIVE
         ])
 
@@ -1285,7 +1432,7 @@ class FailureSimulator:
             initial_throughput=total_weight,
             remaining_throughput=total_weight - lost_weight,
             throughput_loss=throughput_loss,
-            flow_disruption=self._impact_flow_disruption(),
+            flow_disruption=self._impact_flow_disruption(net),
             affected_topics=affected_topics,
             affected_subscribers=affected_subscribers,
             affected_publishers=affected_publishers,
@@ -1336,6 +1483,10 @@ class FailureSimulator:
                 topic = self.graph.topics.get(tid)
                 name = topic.name if topic else tid
                 related.append(f"Routes: {name}")
+        elif target_type == "NetworkDevice":
+            for peer in sorted(self.graph.fabric().adj.get(target_id, ())):
+                pcomp = self.graph.components.get(peer)
+                related.append(f"Links: {pcomp.properties.get('name', peer) if pcomp else peer}")
         return related
     
     def _empty_result_multi(self, scenario: FailureScenario, reason: str) -> FailureResult:

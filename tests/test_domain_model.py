@@ -301,10 +301,10 @@ class TestLayerDefinitions:
         assert defn.quality_focus == "reliability"
 
     def test_infra_layer_projection(self):
-        """π_infra: only Node components, only node_to_node dependencies."""
+        """π_infra: hosts and switches/routers, node_to_node and node_to_device dependencies."""
         defn = LAYER_DEFINITIONS[AnalysisLayer.INFRA]
-        assert defn.component_types == frozenset({"Node"})
-        assert defn.dependency_types == frozenset({"node_to_node"})
+        assert defn.component_types == frozenset({"Node", "NetworkDevice"})
+        assert defn.dependency_types == frozenset({"node_to_node", "node_to_device"})
         assert defn.quality_focus == "availability"
 
     def test_mw_layer_projection(self):
@@ -320,8 +320,8 @@ class TestLayerDefinitions:
     def test_system_layer_projection(self):
         """π_system: all components, all dependency types."""
         defn = LAYER_DEFINITIONS[AnalysisLayer.SYSTEM]
-        assert len(defn.component_types) == 5
-        assert len(defn.dependency_types) == 6
+        assert len(defn.component_types) == 6
+        assert len(defn.dependency_types) == 7
 
     def test_canonical_layer_resolution(self):
         """Canonical names resolve correctly."""
@@ -373,7 +373,7 @@ class TestSimulationLayers:
         defn = SIMULATION_LAYERS[AnalysisLayer.INFRA]
         assert "RUNS_ON" in defn.relationships
         assert "CONNECTS_TO" in defn.relationships
-        assert defn.analyze_types == frozenset({"Node"})
+        assert defn.analyze_types == frozenset({"Node", "NetworkDevice"})
 
     def test_mw_simulation_uses_routing_relationships(self):
         """MW simulation uses ROUTES + pub/sub."""

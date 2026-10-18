@@ -152,6 +152,7 @@ def _run_fault_inject(args: argparse.Namespace) -> None:
         cascade_depth_limit=args.cascade_depth,
         propagation_threshold=args.propagation_threshold,
         qos_factor_mode=getattr(args, "qos_factor", "ladder"),
+        network_gating=getattr(args, "network_gating", False),
     )
     result = injector.run(node_types=node_types, node_ids=node_ids)
     elapsed = time.perf_counter() - t0
@@ -209,7 +210,7 @@ def _run_edge_criticality(args: argparse.Namespace) -> None:
     repo = MemoryRepository()
     repo.save_graph(json.loads(input_path.read_text()), clear=True)
     graph = SimulationGraph(repo.get_graph_data(include_raw=True))
-    sim = FailureSimulator(graph)
+    sim = FailureSimulator(graph, network_gating=args.network_gating)
     # Flow disruption carries 15% of the composite and reads 0.0 until the
     # discrete-event baseline exists. Primed through the service so this path
     # and the shipped API path cannot drift apart.
@@ -597,6 +598,14 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--verbose", "-v", action="store_true",
                        help="Enable DEBUG logging.")
 
+    def _add_network_gating(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--network-gating", action="store_true",
+            help="Count a pub-sub delivery only while the CONNECTS_TO network "
+                 "(hosts, switches, routers) still connects publisher, routing "
+                 "broker and subscriber.  Off by default; a no-op without CONNECTS_TO.",
+        )
+
     # ── fault-inject ──────────────────────────────────────────────────────
     fi = subparsers.add_parser(
         "fault-inject",
@@ -607,6 +616,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_shared(fi)
+    _add_network_gating(fi)
     fi.add_argument(
         "--nodes",
         default=None,
@@ -623,7 +633,9 @@ def _build_parser() -> argparse.ArgumentParser:
              "ground truth and are recorded in the artifact's unlabeled_node_ids.  "
              "'Topic' and 'Node' are excluded on purpose: the cascade derives "
              "DEPENDS_ON only from PUBLISHES_TO/SUBSCRIBES_TO/USES, so injecting "
-             "either yields I(v)=0 for every one of them — spurious zeros, not labels.",
+             "either yields I(v)=0 for every one of them — spurious zeros, not labels.  "
+             "With --network-gating, 'Node' and 'NetworkDevice' do get labels: "
+             "losing them can cut subscribers off from their publishers.",
     )
     fi.add_argument(
         "--seeds",
@@ -670,6 +682,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_shared(ec)
+    _add_network_gating(ec)
     ec.add_argument(
         "--layer-scope",
         default="system",

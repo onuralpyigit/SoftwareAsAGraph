@@ -534,6 +534,10 @@ class AntiPatternDetector:
     def _detect_isolated(self, lr, layer: str, stats: Dict) -> List[DetectedProblem]:
         out = []
         for c in lr.components:
+            # A switch/router with no node_to_device edge is one no host is forced
+            # through -- redundancy, not a disconnected component.
+            if c.type == "NetworkDevice":
+                continue
             if getattr(c.structural, 'is_isolated', False):
                 out.append(self._make_problem("ISOLATED", c.id, {"isolated": True}))
         return out

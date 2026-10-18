@@ -10,9 +10,9 @@ Corresponds to Layer Projections in docs/graph-model.md §5:
 
 Analysis Layers project DEPENDS_ON relationships:
     π_app    → {app_to_app, app_to_lib}                        Analyse Applications and Libraries
-    π_infra  → {node_to_node}                                  Analyse Nodes
+    π_infra  → {node_to_node, node_to_device}                  Analyse Nodes and NetworkDevices
     π_mw     → {app_to_broker, node_to_broker, broker_to_broker}  Analyse Brokers
-    π_system → all six subtypes                                Analyse all components
+    π_system → all seven subtypes                              Analyse all components
 
 Scope constraint: The app layer includes app_to_lib edges so that shared-library
 blast-radius risk is visible when running --layer app. Without this, a Library used by
@@ -164,9 +164,12 @@ LAYER_DEFINITIONS: Dict[AnalysisLayer, LayerDefinition] = {
     ),
     AnalysisLayer.INFRA: LayerDefinition(
         name="Infrastructure Layer",
-        description="π_infra: Analyse Nodes via node_to_node dependencies for availability",
-        component_types=frozenset({"Node"}),
-        dependency_types=frozenset({"node_to_node"}),
+        description=(
+            "π_infra: Analyse Nodes via node_to_node dependencies, and the switches/routers "
+            "between them via node_to_device dependencies, for availability"
+        ),
+        component_types=frozenset({"Node", "NetworkDevice"}),
+        dependency_types=frozenset({"node_to_node", "node_to_device"}),
         focus_metrics=("betweenness", "clustering", "articulation_point", "bridges"),
         quality_focus="availability",
     ),
@@ -187,9 +190,9 @@ LAYER_DEFINITIONS: Dict[AnalysisLayer, LayerDefinition] = {
     ),
     AnalysisLayer.SYSTEM: LayerDefinition(
         name="Complete System",
-        description="π_system: Analyse all components across all six dependency subtypes",
-        component_types=frozenset({"Application", "Broker", "Node", "Topic", "Library"}),
-        dependency_types=frozenset({"app_to_app", "app_to_lib", "app_to_broker", "node_to_node", "node_to_broker", "broker_to_broker"}),
+        description="π_system: Analyse all components across all seven dependency subtypes",
+        component_types=frozenset({"Application", "Broker", "Node", "Topic", "Library", "NetworkDevice"}),
+        dependency_types=frozenset({"app_to_app", "app_to_lib", "app_to_broker", "node_to_node", "node_to_broker", "broker_to_broker", "node_to_device"}),
         focus_metrics=("pagerank", "betweenness", "articulation_point", "clustering"),
         quality_focus="overall",
     ),
@@ -265,9 +268,9 @@ SIMULATION_LAYERS: Dict[AnalysisLayer, SimulationLayerDefinition] = {
     ),
     AnalysisLayer.INFRA: SimulationLayerDefinition(
         name="Infrastructure Layer",
-        description="Simulate nodes via RUNS_ON/CONNECTS_TO relationships",
-        component_types=frozenset({"Node", "Application", "Broker"}),
-        analyze_types=frozenset({"Node"}),
+        description="Simulate nodes and switches/routers via RUNS_ON/CONNECTS_TO relationships",
+        component_types=frozenset({"Node", "NetworkDevice", "Application", "Broker"}),
+        analyze_types=frozenset({"Node", "NetworkDevice"}),
         relationships=frozenset({"RUNS_ON", "CONNECTS_TO"}),
         cascade_rules=frozenset({"physical", "network"}),
         focus_metrics=("reachability_loss", "fragmentation", "cascade_depth"),
@@ -284,8 +287,8 @@ SIMULATION_LAYERS: Dict[AnalysisLayer, SimulationLayerDefinition] = {
     AnalysisLayer.SYSTEM: SimulationLayerDefinition(
         name="Complete System",
         description="Simulate all components across all relationship types",
-        component_types=frozenset({"Application", "Broker", "Node", "Topic", "Library"}),
-        analyze_types=frozenset({"Application", "Broker", "Node"}),
+        component_types=frozenset({"Application", "Broker", "Node", "Topic", "Library", "NetworkDevice"}),
+        analyze_types=frozenset({"Application", "Broker", "Node", "NetworkDevice"}),
         relationships=frozenset({"PUBLISHES_TO", "SUBSCRIBES_TO", "ROUTES", "RUNS_ON", "CONNECTS_TO", "USES"}),
         cascade_rules=frozenset({"physical", "logical", "network"}),
         focus_metrics=("throughput", "reachability_loss", "fragmentation", "composite_impact"),
@@ -303,6 +306,7 @@ DEPENDENCY_TO_LAYER: Dict[str, AnalysisLayer] = {
     "app_to_app": AnalysisLayer.APP,
     "app_to_lib": AnalysisLayer.APP,
     "node_to_node": AnalysisLayer.INFRA,
+    "node_to_device": AnalysisLayer.INFRA,
     "app_to_broker": AnalysisLayer.MW,
     "node_to_broker": AnalysisLayer.MW,
     "broker_to_broker": AnalysisLayer.MW,

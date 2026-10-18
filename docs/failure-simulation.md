@@ -30,6 +30,7 @@
    - 5.4 [ISO/IEC 25010 Quality Decompositions ($IR, IM, IA, IFT$)](#54-isoiec-25010-quality-decompositions-ir-im-ia-ift)
    - 5.5 [Flow Disruption & Baseline Flow Priming](#55-flow-disruption--baseline-flow-priming)
    - 5.6 [Relationship Criticality ($I_{\text{edge}}(u,v)$)](#56-relationship-criticality-i_textedgeuv)
+   - 5.6a [Network Gating: Switches, Routers & Link Capacity](#56a-network-gating-switches-routers--link-capacity)
    - 5.7 [How to Run `FailureSimulator`](#57-how-to-run-failuresimulator)
    - 5.8 [Academic Provenance & Quality Gating Roles](#58-academic-provenance--quality-gating-roles)
 6. [Engine 3: `EventSimulator` (Built-In Discrete-Event Engine — Supporting Baseline)](#6-engine-3-eventsimulator-built-in-discrete-event-engine--supporting-baseline)
@@ -557,6 +558,17 @@ Priming executes a deterministically seeded run with `EventSimulator` under heal
 $$I_{\text{edge}}(u,v) = \bar{I}_{\text{comp}}\big(G \setminus \{(u,v)\}\big) - \bar{I}_{\text{comp}}(G)$$
 
 This measures the loss inflicted when dependency $(u,v)$ is removed while both endpoints stay operational.
+
+### 5.6a Network Gating: Switches, Routers & Link Capacity
+
+By default the NETWORK cascade is the legacy host-isolation rule: a failed `Node` isolates mesh peers that have no other link. When the topology models its network (`NetworkDevice` switches/routers, `CONNECTS_TO` links with `capacity_mbps`; see [graph-model.md §5.2](graph-model.md#52-phase-2-structural-topology--degree-augmentation)), pass `network_gating=True` (`SimulationService(..., network_gating=True)`, `GraphEvaluator(network_gating=True)`, `--network-gating` on the CLI). Every live pub-sub flow is then routed over the live network (publisher host → routing broker host → subscriber host, shortest paths, ECMP split; [`saag/core/network.py`](../saag/core/network.py)):
+
+- **Reachability (cascade).** A subscriber whose topic is still produced and routed, but which no live path connects to any publisher, starves (`network_unreachable:<id>`). This replaces the host-isolation rule. A feed the healthy network never delivered is not charged to the failure.
+- **Congestion (measurement only).** If links declare capacity, the flows rerouted after a failure load the surviving links. A link with utilisation $u > 1$ delivers $1/u$ of what crosses it. A flow's network loss is measured **relative to its baseline**, $1 - (1-\ell)/(1-\ell_0)$, so a link that is already over-subscribed when healthy is not charged to every component. This loss scales the reachability, throughput and flow-disruption terms. It never fails a component, so it does not compound with the cascade.
+
+Both are off by default. With gating off, a topology with devices still loads, but device failures only score fragmentation, and a warning is logged.
+
+`FaultInjector(network_gating=True)` applies the reachability rule (not congestion) to $I^*$: a feed the live network no longer delivers counts as fully lost. Pass `--node-types ...,Node,NetworkDevice` to label hosts and devices.
 
 ---
 
@@ -1294,6 +1306,7 @@ python cli/simulate_graph.py fault-inject \
 - `--propagation-threshold`: Cascade sensitivity threshold (default: `0.2`).
 - `--nodes`: Specific component IDs to inject (default: all eligible nodes).
 - `--node-types`: Filter node types (default: `Application,Broker`).
+- `--network-gating`: Route deliveries over `CONNECTS_TO` (§5.6a); gives `Node` and `NetworkDevice` failures labels of their own.
 
 ---
 

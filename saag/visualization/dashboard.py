@@ -34,6 +34,7 @@ COMPONENT_LAYER_MAP = {
     "Topic":       "layer-mw",
     "Broker":      "layer-mw",
     "Node":        "layer-infra",
+    "NetworkDevice": "layer-infra",
 }
 
 LAYER_COMPOUNDS = {

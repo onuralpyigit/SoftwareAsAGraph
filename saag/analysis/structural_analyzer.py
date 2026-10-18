@@ -561,6 +561,8 @@ class StructuralAnalyzer:
                 broker_type=G.nodes[nid].get("type", ""),
                 max_connections=G.nodes[nid].get("max_connections", 0),
                 host=G.nodes[nid].get("host", ""),
+                max_link_utilization=G.nodes[nid].get("max_link_utilization", 0.0),
+                link_load_mbps=G.nodes[nid].get("link_load_mbps", 0.0),
                 # Code quality — raw stored temporarily; post-loop normalisation fills them
                 # loc_norm / complexity_norm / lcom_norm hold RAW values until the pass
                 loc_norm=float(raw_loc),
@@ -1078,10 +1080,14 @@ class StructuralAnalyzer:
         sample_nodes: List[str] = []
         baseline_avg = 0.0
         if len(largest_cc_nodes) > 1:
+            # Ties on degree are broken by id. `largest_cc_nodes` is a set, so a
+            # degree-only key left equal-degree nodes in set-iteration order --
+            # salted by PYTHONHASHSEED -- and which of them made the cut changed
+            # the baseline, every node's CDI and so Q(v) from one process to the
+            # next (up to 4.4e-4 on atm_system).
             sample_nodes = sorted(
                 largest_cc_nodes,
-                key=lambda v: G_main.degree(v),
-                reverse=True,
+                key=lambda v: (-G_main.degree(v), str(v)),
             )[:_CDI_SAMPLE]
             baseline_avg = _avg_bfs_length(G_main, sample_nodes)
 

@@ -16,7 +16,7 @@ from torch import Tensor
 
 # Import canonical dimension constants to avoid drift between data prep and model
 from ..data_preparation import (
-    NODE_TYPE_TO_DIM, EDGE_FEATURE_DIM, _EDGE_BASE_DIM, _QOS_EXTRA_DIM, LABEL_COLS,
+    NODE_TYPE_TO_DIM, EDGE_FEATURE_DIM, _EDGE_BASE_DIM, _QOS_EXTRA_DIM, LABEL_COLS, node_type_dim,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,9 @@ def _patch_hgtconv_device_bug():
     HGTConv._construct_src_node_feat = _construct_src_node_feat
 
 
-NODE_TYPES: List[str] = ["Application", "Broker", "Topic", "Node", "Library"]
+# NetworkDevice is appended, not inserted: a graph without switches/routers
+# yields exactly the tensors and HGT metadata it did before it existed.
+NODE_TYPES: List[str] = ["Application", "Broker", "Topic", "Node", "Library", "NetworkDevice"]
 #: composite, reliability, maintainability. Derived from LABEL_COLS rather
 #: than restated, so a label-contract change can't leave this out of sync —
 #: exactly the defect class that once zeroed a whole prediction column.
@@ -321,7 +323,7 @@ class NodeCriticalityGNN(nn.Module):
         # Per-type input projections — dims sourced from data_preparation constants
         self.input_proj = nn.ModuleDict({
             nt: nn.Sequential(
-                nn.Linear(NODE_TYPE_TO_DIM.get(nt, 18) + extra, hidden_channels),
+                nn.Linear(node_type_dim(nt) + extra, hidden_channels),
                 nn.LayerNorm(hidden_channels),
                 nn.GELU(),
             )

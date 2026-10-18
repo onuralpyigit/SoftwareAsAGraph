@@ -16,6 +16,10 @@ from saag.core.models import (
     LIB_FANOUT_GAMMA, MIN_TOPIC_WEIGHT,
 )
 from saag.core.utils import serialization
+from saag.core.network import (
+    LINK_PROPERTIES, Fabric, baseline_load, derive_node_to_device,
+    vertex_load_metrics,
+)
 
 #: Vertex collection -> vertex type label, in import order.
 COMPONENT_TYPES: Dict[str, str] = {
@@ -24,6 +28,7 @@ COMPONENT_TYPES: Dict[str, str] = {
     "topics": "Topic",
     "applications": "Application",
     "libraries": "Library",
+    "network_devices": "NetworkDevice",
 }
 
 #: Structural relationship keys, i.e. every relationship except derived DEPENDS_ON.
@@ -196,8 +201,55 @@ class MemoryRepository:
         for node in self.data["nodes"]:
             node["weight"] = max(hosted.get(node["id"], [MIN_TOPIC_WEIGHT]))
 
+        # 6. Network devices — floor here; Phase 5b lifts them once Rule 7 exists
+        for device in self.data["network_devices"]:
+            device["weight"] = MIN_TOPIC_WEIGHT
+
     # ==========================================
-    # Phase 4: DEPENDS_ON derivation (Rules 1–6)
+    # Phase 5c: baseline network load
+    # ==========================================
+
+    def _has_network_model(self) -> bool:
+        """Switches/routers or link capacities declared: the network is modelled."""
+        return bool(self.data["network_devices"]) or any(
+            rel.get("capacity_mbps") is not None
+            for rel in self.data["relationships"]["connects_to"]
+        )
+
+    def _calculate_network_load(self) -> None:
+        """Route the healthy pub-sub flows over CONNECTS_TO and store link load.
+
+        Links get ``load_mbps`` / ``utilization``; hosts and devices get
+        ``max_link_utilization`` / ``link_load_mbps``. A no-op unless the
+        topology models its network (devices or capacities).
+        """
+        if not self._has_network_model():
+            return
+        hosts_of: Dict[str, List[str]] = {}
+        for rel in self.data["relationships"]["runs_on"]:
+            hosts_of.setdefault(rel["from"], []).append(rel["to"])
+        links = self.data["relationships"]["connects_to"]
+        fabric, state = baseline_load(
+            vertices=[v["id"] for key in ("nodes", "network_devices") for v in self.data[key]],
+            links=[(l["from"], l["to"], l.get("capacity_mbps")) for l in links],
+            publishers_of=self._sources_by_target("publishes_to"),
+            subscribers_of=self._sources_by_target("subscribes_to"),
+            routers_of=self._sources_by_target("routes"),
+            hosts_of=hosts_of,
+            topic_attrs={t["id"]: t for t in self.data["topics"]},
+        )
+        for l in links:
+            key = frozenset((l["from"], l["to"]))
+            l["load_mbps"] = state.link_load.get(key, 0.0)
+            if state.link_util.get(key) is not None:
+                l["utilization"] = state.link_util[key]
+        metrics = vertex_load_metrics(fabric, state)
+        for key in ("nodes", "network_devices"):
+            for v in self.data[key]:
+                v.update(metrics.get(v["id"], {}))
+
+    # ==========================================
+    # Phase 4: DEPENDS_ON derivation (Rules 1–7)
     # ==========================================
 
     def _sources_by_target(self, rel_type: str) -> Dict[str, List[str]]:
@@ -226,7 +278,7 @@ class MemoryRepository:
 
     def _derive_dependencies(self) -> None:
         """
-        Derive DEPENDS_ON edges from structural edges (Rules 1–6, docs/graph-model.md §4.4).
+        Derive DEPENDS_ON edges from structural edges (Rules 1–7, docs/graph-model.md §4.4).
 
         Direction convention: dependent -> dependency, the reverse of data flow. If
         Application A publishes to a Topic that Application B subscribes to, B depends on A
@@ -252,6 +304,7 @@ class MemoryRepository:
                                        brokers_of, lib_users),
         }
         edges.update(self._rules_lift_to_nodes(edges, host_of))
+        edges.update(self._rule_node_to_device(edges))
         edges.update(self._rule_app_to_lib(types))
         edges.update(self._rule_broker_to_broker(types))
 
@@ -403,10 +456,29 @@ class MemoryRepository:
             for (b1, b2), nodes in shared_nodes.items()
         }
 
+    def _rule_node_to_device(self, edges: Dict) -> Dict:
+        """Rule 7 — a host depends on a switch/router every path to its dependencies crosses."""
+        devices = [d["id"] for d in self.data["network_devices"]]
+        if not devices:
+            return {}
+        fabric = Fabric(
+            [v["id"] for key in ("nodes", "network_devices") for v in self.data[key]],
+            [(l["from"], l["to"], None) for l in self.data["relationships"]["connects_to"]],
+        )
+        node_deps = [
+            (src, tgt, edge["weight"])
+            for (src, tgt, dep_type), edge in edges.items() if dep_type == "node_to_node"
+        ]
+        return {
+            (node, device, "node_to_device"): {"weight": w, "path_count": n}
+            for (node, device), (w, n) in derive_node_to_device(fabric, devices, node_deps).items()
+        }
+
     def _finalize_dependency_weights(self) -> None:
         """
         Phase 5b: give the Rule 5 and Rule 6 edges the component
-        weights they could not carry when they were derived.
+        weights they could not carry when they were derived, and give
+        NetworkDevices the weight of the hosts that depend on them (Rule 7).
         """
         comp_weights = {
             item["id"]: item.get("weight", MIN_TOPIC_WEIGHT)
@@ -431,6 +503,16 @@ class MemoryRepository:
                     (comp_weights.get(n, MIN_TOPIC_WEIGHT) for n in shared),
                     default=MIN_TOPIC_WEIGHT,
                 )
+
+        # A switch/router inherits the worst-case weight of the hosts that depend on it
+        dependents: Dict[str, List[float]] = {}
+        for edge in self.data["relationships"].get("depends_on", []):
+            if edge["dependency_type"] == "node_to_device":
+                dependents.setdefault(edge["to"], []).append(
+                    comp_weights.get(edge["from"], MIN_TOPIC_WEIGHT)
+                )
+        for device in self.data["network_devices"]:
+            device["weight"] = max(dependents.get(device["id"], []), default=MIN_TOPIC_WEIGHT)
 
         # An app_to_lib edge still at the floor means _calculate_aggregate_weights()
         # never gave the consuming application a real weight — either it did not run
@@ -477,11 +559,14 @@ class MemoryRepository:
         # 3. Structural relationships
         for key in STRUCTURAL_RELATIONSHIPS:
             for item in data.get("relationships", {}).get(key, []):
-                self.data["relationships"][key].append({
+                rel = {
                     "from": item.get("from", item.get("source")),
                     "to": item.get("to", item.get("target")),
                     "weight": item.get("weight", 1.0),
-                })
+                }
+                if key == "connects_to":
+                    rel.update({k: item[k] for k in LINK_PROPERTIES if k in item})
+                self.data["relationships"][key].append(rel)
 
         # 4. Topic fan-out augmentation (parity with Neo4j)
         subscribers_of = self._sources_by_target("subscribes_to")
@@ -493,6 +578,7 @@ class MemoryRepository:
         # 5. Weights
         self._calculate_intrinsic_weights()
         self._calculate_aggregate_weights()
+        self._calculate_network_load()
 
 
     def get_graph_data(

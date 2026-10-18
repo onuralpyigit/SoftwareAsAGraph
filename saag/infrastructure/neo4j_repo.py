@@ -9,7 +9,7 @@ of docs/graph-model.md in five phases split across two stages:
                            Phase 3  QoS-based topic weights (w)
                            Phase 5a Aggregate vertex weights
 
-    derive_dependencies()  Phase 4  DEPENDS_ON derivation (E_D, Rules 1–6)
+    derive_dependencies()  Phase 4  DEPENDS_ON derivation (E_D, Rules 1–7)
                            Phase 5b DEPENDS_ON edge weight finalization
 """
 
@@ -35,9 +35,12 @@ from saag.core.models import (
 )
 from . import config
 from saag.core.utils import serialization
+from saag.core.network import (
+    LINK_PROPERTIES, Fabric, baseline_load, derive_node_to_device, vertex_load_metrics,
+)
 
 #: Vertex labels of the graph model, in import order.
-COMPONENT_LABELS = ["Node", "Broker", "Topic", "Application", "Library"]
+COMPONENT_LABELS = ["Node", "Broker", "Topic", "Application", "Library", "NetworkDevice"]
 
 #: Structural relationship type -> (source labels, target label). The label
 #: constraints let Neo4j use the uniqueness indexes when matching endpoints.
@@ -46,14 +49,14 @@ STRUCTURAL_RELATIONSHIPS = {
     "routes": ("ROUTES", "Broker", "Topic"),
     "publishes_to": ("PUBLISHES_TO", "Application|Library", "Topic"),
     "subscribes_to": ("SUBSCRIBES_TO", "Application|Library", "Topic"),
-    "connects_to": ("CONNECTS_TO", "Node", "Node"),
+    "connects_to": ("CONNECTS_TO", "Node|NetworkDevice", "Node|NetworkDevice"),
     "uses": ("USES", "Application|Library", "Library"),
 }
 
-#: DEPENDS_ON subtypes produced by the six derivation rules.
+#: DEPENDS_ON subtypes produced by the seven derivation rules.
 DEPENDENCY_TYPES = [
     "app_to_app", "app_to_lib", "app_to_broker",
-    "node_to_node", "node_to_broker", "broker_to_broker",
+    "node_to_node", "node_to_broker", "broker_to_broker", "node_to_device",
 ]
 
 #: Code-quality and system-hierarchy properties shared by Application and Library
@@ -105,7 +108,7 @@ class Neo4jRepository:
     Handles all Neo4j-specific operations including:
     - Graph data import with constraint management
     - Weight computation for vertices and edges (docs/graph-model.md §4.3, §4.5)
-    - Dependency derivation between components (§4.4, Rules 1–6)
+    - Dependency derivation between components (§4.4, Rules 1–7)
     - Graph data retrieval with layer filtering (§5)
     """
     
@@ -182,6 +185,9 @@ class Neo4jRepository:
             
             # 4. Compute aggregate component weights
             self._calculate_aggregate_weights(tx)
+
+            # 5. Baseline network load (only when the network is modelled)
+            self._calculate_network_load(tx)
             
             self.logger.info("Import completed successfully.")
             
@@ -200,9 +206,9 @@ class Neo4jRepository:
         DEPENDS_ON edge weights.
 
         Must be called after save_graph() and before any analysis step. Applies
-        Rules 1–6 (docs/graph-model.md §4.4), then gives the app_to_lib (Rule 5)
+        Rules 1–7 (docs/graph-model.md §4.4), then gives the app_to_lib (Rule 5)
         and broker_to_broker (Rule 6) edges the component weights they could not
-        carry when they were derived.
+        carry when they were derived, and NetworkDevices their Rule 7 weight.
         """
         self.logger.info("Pre-analysis: deriving DEPENDS_ON relationships.")
         with self.driver.session(database=self.database) as session:
@@ -239,6 +245,14 @@ class Neo4jRepository:
             MATCH (b1)-[:RUNS_ON]->(n:Node)<-[:RUNS_ON]-(b2)
             WITH d, max(n.weight) as node_w
             SET d.weight = coalesce(node_w, 0.01)
+        """, tx=tx)
+
+        # NetworkDevice weight (worst-case host depending on it, Rule 7)
+        self._run_query("""
+            MATCH (dev:NetworkDevice)
+            OPTIONAL MATCH (n:Node)-[:DEPENDS_ON {dependency_type: 'node_to_device'}]->(dev)
+            WITH dev, max(n.weight) as host_w
+            SET dev.weight = CASE WHEN coalesce(host_w, 0.0) < 0.01 THEN 0.01 ELSE host_w END
         """, tx=tx)
 
     def _run_query(self, query: str, parameters: Dict = None, tx: Any = None) -> Any:
@@ -321,6 +335,7 @@ class Neo4jRepository:
         self._import_topics(data.get("topics", []), tx=tx)
         self._import_applications(data.get("applications", []), tx=tx)
         self._import_libraries(data.get("libraries", []), tx=tx)
+        self._import_network_devices(data.get("network_devices", []), tx=tx)
 
     def _import_nodes(self, nodes_data: List[Dict[str, Any]], tx: Any = None) -> None:
         """Import compute nodes with infrastructure metadata."""
@@ -332,6 +347,14 @@ class Neo4jRepository:
                 n.cpu_cores = row.cpu_cores,
                 n.memory_gb = row.memory_gb,
                 n.os_type = row.os_type
+        """, tx=tx)
+
+    def _import_network_devices(self, devices_data: List[Dict[str, Any]], tx: Any = None) -> None:
+        """Import switches and routers."""
+        devices = [serialization.flatten_component(d, "NetworkDevice") for d in devices_data]
+        self._import_batch(devices, """
+            MERGE (d:NetworkDevice {id: row.id})
+            SET d.name = row.name, d.role = row.role
         """, tx=tx)
 
     def _import_metadata(self, metadata: Dict[str, Any], tx: Any = None) -> None:
@@ -416,14 +439,19 @@ class Neo4jRepository:
 
             batch = [{"from": r.get("from", r.get("source")),
                       "to": r.get("to", r.get("target"))} for r in items]
+            if key == "connects_to":
+                for row, r in zip(batch, items):
+                    row["props"] = {k: r[k] for k in LINK_PROPERTIES if k in r}
 
             self._validate_endpoints_exist(batch, key, rel_type, tx=tx)
 
             # Create edges using label-optimized match
             query = f"""
                 MATCH (a:{src_labels} {{id: row.from}}), (b:{tgt_labels} {{id: row.to}})
-                MERGE (a)-[:{rel_type}]->(b)
+                MERGE (a)-[r:{rel_type}]->(b)
             """
+            if key == "connects_to":
+                query += "SET r += row.props\n"
             self._import_batch(batch, query, tx=tx)
 
         # Phase 2 post-step: Fan-out augmentation for Topic
@@ -613,6 +641,89 @@ class Neo4jRepository:
             WITH n, max(c.weight) as hosted_max
             SET n.weight = coalesce(hosted_max, 0.01)
         """, tx=tx)
+
+        # 5. NetworkDevice Weight: floor here; Phase 5b lifts it once Rule 7 exists
+        self._run_query("MATCH (d:NetworkDevice) SET d.weight = 0.01", tx=tx)
+
+    def _fetch_network(self, tx: Any = None) -> Tuple[List[str], List[Tuple[str, str, Any]]]:
+        """Every host and switch/router, and the CONNECTS_TO links with their capacity."""
+        vertices = [r["id"] for r in self._fetch(
+            "MATCH (v) WHERE v:Node OR v:NetworkDevice RETURN v.id as id", tx=tx)]
+        links = [(r["src"], r["dst"], r["cap"]) for r in self._fetch("""
+            MATCH (a)-[r:CONNECTS_TO]->(b)
+            RETURN a.id as src, b.id as dst, r.capacity_mbps as cap
+        """, tx=tx)]
+        return vertices, links
+
+    def _calculate_network_load(self, tx: Any = None) -> None:
+        """Phase 5c: baseline link load, only when the network is modelled.
+
+        Read back from the stored graph rather than the import payload, so a
+        merge import (clear=False) is measured as a whole.
+        """
+        modelled = self._fetch("""
+            OPTIONAL MATCH (d:NetworkDevice) WITH count(d) as devices
+            OPTIONAL MATCH ()-[r:CONNECTS_TO]->() WHERE r.capacity_mbps IS NOT NULL
+            RETURN devices, count(r) as capacities
+        """, tx=tx)[0]
+        if not (modelled["devices"] or modelled["capacities"]):
+            return
+
+        def index(rel: str) -> Dict[str, List[str]]:
+            out: Dict[str, List[str]] = {}
+            for r in self._fetch(f"MATCH (a)-[:{rel}]->(b) RETURN a.id as src, b.id as dst", tx=tx):
+                out.setdefault(r["dst"], []).append(r["src"])
+            return out
+
+        hosts_of: Dict[str, List[str]] = {}
+        for host, comps in index("RUNS_ON").items():
+            for comp in comps:
+                hosts_of.setdefault(comp, []).append(host)
+        vertices, links = self._fetch_network(tx)
+        fabric, state = baseline_load(
+            vertices=vertices,
+            links=links,
+            publishers_of=index("PUBLISHES_TO"),
+            subscribers_of=index("SUBSCRIBES_TO"),
+            routers_of=index("ROUTES"),
+            hosts_of=hosts_of,
+            topic_attrs={r["id"]: {"size": r["size"], "topic_frequency": r["freq"]} for r in self._fetch(
+                "MATCH (t:Topic) RETURN t.id as id, t.size as size, t.topic_frequency as freq", tx=tx)},
+        )
+        link_rows = []
+        for key, load in state.link_load.items():
+            a, b = sorted(key)
+            link_rows.append({"a": a, "b": b, "load": load, "util": state.link_util.get(key)})
+        self._import_batch(link_rows, """
+            MATCH (x {id: row.a})-[r:CONNECTS_TO]-(y {id: row.b})
+            SET r.load_mbps = row.load, r.utilization = row.util
+        """, tx=tx)
+        vertex_rows = [{"id": v, **m} for v, m in vertex_load_metrics(fabric, state).items()]
+        self._import_batch(vertex_rows, """
+            MATCH (v {id: row.id}) WHERE v:Node OR v:NetworkDevice
+            SET v.max_link_utilization = row.max_link_utilization,
+                v.link_load_mbps = row.link_load_mbps
+        """, tx=tx)
+
+    def _derive_node_to_device(self, tx: Any = None) -> None:
+        """Rule 7 via the shared separator helper, written back with UNWIND."""
+        devices = [r["id"] for r in self._fetch("MATCH (d:NetworkDevice) RETURN d.id as id", tx=tx)]
+        if not devices:
+            return
+        node_deps = [(r["src"], r["dst"], r["w"]) for r in self._fetch("""
+            MATCH (a:Node)-[d:DEPENDS_ON {dependency_type: 'node_to_node'}]->(b:Node)
+            RETURN a.id as src, b.id as dst, d.weight as w
+        """, tx=tx)]
+        rows = [
+            {"src": node, "dev": device, "w": w, "pc": n}
+            for (node, device), (w, n) in derive_node_to_device(
+                Fabric(*self._fetch_network(tx)), devices, node_deps).items()
+        ]
+        self._import_batch(rows, """
+            MATCH (n:Node {id: row.src}), (dev:NetworkDevice {id: row.dev})
+            MERGE (n)-[d:DEPENDS_ON {dependency_type: 'node_to_device'}]->(dev)
+            SET d.weight = row.w, d.path_count = row.pc
+        """, tx=tx)
         
     def _merge_dependency(
         self, match: str, source: str, target: str, dep_type: str, tx: Any = None
@@ -642,7 +753,7 @@ class Neo4jRepository:
         """
         Derive DEPENDS_ON relationships from structural edges (Phase 4).
 
-        Implements Rules 1–6 from docs/graph-model.md §4.4. Rules 1 and 2 each
+        Implements Rules 1–7 from docs/graph-model.md §4.4. Rules 1 and 2 each
         run three times: once for directly attached components and twice for
         components reaching the topic through a USES chain of up to three hops.
         """
@@ -701,6 +812,11 @@ class Neo4jRepository:
             MERGE (n)-[d:DEPENDS_ON {dependency_type: 'node_to_broker'}]->(broker)
             SET d.weight = coalesce(lifted_max, 0.01), d.path_count = dep_count
         """, tx=tx)
+
+        # Rule 7: node_to_device — a host depends on the switches/routers every
+        # network path to its node_to_node dependencies crosses. A separator test
+        # is not expressible in Cypher, so it is computed by the shared helper.
+        self._derive_node_to_device(tx)
  
         # Rule 6: broker_to_broker — colocation dependency via shared node
         # Weight is a placeholder (0.01) here; Phase 5b overwrites it with the
@@ -797,9 +913,14 @@ class Neo4jRepository:
                     result = session.run(
                         f"MATCH (s)-[r:{rel_type}]->(t) "
                         f"RETURN s.id as src, t.id as tgt, labels(s)[0] as stype, "
-                        f"labels(t)[0] as ttype, r.weight as weight"
+                        f"labels(t)[0] as ttype, r.weight as weight, properties(r) as props"
                     )
                     for record in result:
+                        # Only network links carry input properties (interface, capacity, load).
+                        props = (
+                            {k: v for k, v in dict(record["props"]).items() if k != "weight"}
+                            if rel_type == "CONNECTS_TO" else {}
+                        )
                         edges.append(EdgeData(
                             source_id=record["src"],
                             target_id=record["tgt"],
@@ -808,6 +929,7 @@ class Neo4jRepository:
                             dependency_type=rel_type.lower(),
                             relation_type=rel_type,
                             weight=record["weight"] or 1.0,
+                            properties=props,
                         ))
 
         return GraphData(components=components, edges=edges)
@@ -1317,7 +1439,7 @@ class Neo4jRepository:
 
     def _fetch_full_topology(self, session, components, edges, node_limit):
         node_query = """
-        MATCH (n:Node)
+        MATCH (n) WHERE n:Node OR n:NetworkDevice
         RETURN n.id AS id, labels(n)[0] AS type, COALESCE(n.weight, 1.0) AS weight, properties(n) AS props
         ORDER BY COALESCE(n.weight, 0.0) DESC
         LIMIT $limit
@@ -1328,7 +1450,7 @@ class Neo4jRepository:
         node_ids = [c["id"] for c in components]
         
         edges_query = """
-        MATCH (s:Node)-[r:CONNECTS_TO]->(t:Node)
+        MATCH (s)-[r:CONNECTS_TO]->(t)
         WHERE s.id IN $node_ids AND t.id IN $node_ids
         RETURN s.id AS source_id, t.id AS target_id, labels(s)[0] AS source_type, labels(t)[0] AS target_type,
                 type(r) AS relation_type, COALESCE(r.weight, 1.0) AS weight, properties(r) AS props

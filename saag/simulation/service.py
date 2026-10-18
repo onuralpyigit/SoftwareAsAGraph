@@ -46,16 +46,21 @@ class SimulationService:
     Orchestrates EventSimulator and FailureSimulator directly.
     """
 
-    def __init__(self, repository: IGraphRepository, qos_weighting: bool = True):
+    def __init__(self, repository: IGraphRepository, qos_weighting: bool = True,
+                 network_gating: bool = False):
         """
         Args:
             repository: Graph repository port.
             qos_weighting: Weight impact terms by the QoS severity of what was lost.
                 False produces the topology-only oracle arm used by the label
                 ablation (reproduce/qos_label_ablation.py).
+            network_gating: Count a delivery only while the CONNECTS_TO network
+                still carries it (reachability, and congestion where links declare
+                capacity). See FailureSimulator.
         """
         self.repository = repository
         self.qos_weighting = qos_weighting
+        self.network_gating = network_gating
 
     # =========================================================================
     # Wiring helpers
@@ -75,6 +80,7 @@ class SimulationService:
             graph,
             propagation_threshold=propagation_threshold,
             qos_weighting=self.qos_weighting,
+            network_gating=self.network_gating,
         )
 
     @staticmethod

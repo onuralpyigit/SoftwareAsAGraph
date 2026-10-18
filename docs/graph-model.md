@@ -26,8 +26,9 @@ For the complete CLI command reference (`import_graph.py`, `export_graph.py`), s
    - 5.2 [Phase 2: Structural Topology & Degree Augmentation](#52-phase-2-structural-topology--degree-augmentation)
    - 5.3 [Phase 3: Intrinsic Topic Weighting ($w(t)$)](#53-phase-3-intrinsic-topic-weighting-wt)
    - 5.4 [Phase 5a: Aggregate Vertex Weighting ($w(v)$)](#54-phase-5a-aggregate-vertex-weighting-wv)
+   - 5.5 [Phase 5c: Baseline Network Load](#55-phase-5c-baseline-network-load)
 6. [Stage 2 (Pre-Analysis): Dependency Derivation & Edge Finalization](#6-stage-2-pre-analysis-dependency-derivation--edge-finalization)
-   - 6.1 [Phase 4: The Six Dependency Derivation Rules](#61-phase-4-the-six-dependency-derivation-rules)
+   - 6.1 [Phase 4: The Seven Dependency Derivation Rules](#61-phase-4-the-seven-dependency-derivation-rules)
    - 6.2 [Multi-Topic Probabilistic Union vs. Worst-Case Lift](#62-multi-topic-probabilistic-union-vs-worst-case-lift)
    - 6.3 [Phase 5b: Edge Weight Finalization](#63-phase-5b-edge-weight-finalization)
    - 6.4 [Implementation Parity (Neo4j, Memory, Simulation)](#64-implementation-parity-neo4j-memory-simulation)
@@ -228,12 +229,12 @@ $$\mathcal{G} = (V, E, \tau_V, \tau_E, w_V, w_E, \mathcal{L})$$
 
 where:
 
-- **Vertices ($V$)**: Partitioned into five distinct architectural entities:
-  $$V = V_{\text{app}} \cup V_{\text{broker}} \cup V_{\text{topic}} \cup V_{\text{node}} \cup V_{\text{lib}}$$
+- **Vertices ($V$)**: Partitioned into six distinct architectural entities (the sixth, $V_{\text{dev}}$, is empty unless the topology models its switches and routers):
+  $$V = V_{\text{app}} \cup V_{\text{broker}} \cup V_{\text{topic}} \cup V_{\text{node}} \cup V_{\text{lib}} \cup V_{\text{dev}}$$
 - **Edges ($E$)**: Union of physical structural links and logical causal dependencies:
   $$E = E_{\text{structural}} \cup E_{\text{dependency}}$$
 - **Vertex Categorization Function ($\tau_V$)**: Maps each vertex to its entity type:
-  $$\tau_V : V \to \{\text{Application}, \text{Broker}, \text{Topic}, \text{Node}, \text{Library}\}$$
+  $$\tau_V : V \to \{\text{Application}, \text{Broker}, \text{Topic}, \text{Node}, \text{Library}, \text{NetworkDevice}\}$$
 - **Edge Categorization Function ($\tau_E$)**: Maps each edge to its relationship type:
   $$\tau_E : E \to \{\text{PUBLISHES\_TO}, \text{SUBSCRIBES\_TO}, \text{ROUTES}, \text{RUNS\_ON}, \text{CONNECTS\_TO}, \text{USES}, \text{DEPENDS\_ON}\}$$
 - **Vertex Weight Function ($w_V$)**: Quantifies intrinsic or aggregate criticality:
@@ -254,6 +255,7 @@ During Phase 1, every component in the topology JSON is ingested into its respec
 | Entity Type | Graph Label | Core Properties | Architectural Description |
 |:---|:---|:---|:---|
 | **Node** | `:Node` | `id`, `name`, `ip_address`, `cpu_cores`, `memory_gb`, `os_type` | Physical host machine, VM, or bare-metal compute unit. |
+| **NetworkDevice** | `:NetworkDevice` | `id`, `name`, `role` (`switch` \| `router`) | Switch or router that hosts reach each other through. Optional: listed under `network_devices`. |
 | **Broker** | `:Broker` | `id`, `name`, `type`, `max_connections`, `host` | Message broker engine (e.g., DDS participant, Kafka broker, EMQX). |
 | **Topic** | `:Topic` | `id`, `name`, `size`, `qos_reliability`, `qos_durability`, `qos_transport_priority`, `qos_deadline_ms`, `qos_history_depth`, `topic_frequency`, `topic_criticality` | Asynchronous pub-sub channel governed by Quality of Service (QoS) contracts. |
 | **Application** | `:Application` | `id`, `name`, `role`, `app_type`, `version`, `criticality`, `hotstandby`, `cm_*` | Executable software service or process with 3-tier operational priority (`HIGH`, `MEDIUM`, `LOW`) and dual-node failover (`hotstandby`). |
@@ -269,7 +271,7 @@ For Applications and Libraries, object-oriented static code metrics are ingested
 
 ### 5.2 Phase 2: Structural Topology & Degree Augmentation
 
-Phase 2 imports the six physical structural relationship types that define the communication and deployment layout:
+Phase 2 imports the six structural relationship types that define the communication, deployment and network layout:
 
 | Relationship | Source ($\tau_V(u)$) | Target ($\tau_V(v)$) | Architectural Meaning |
 |:---|:---|:---|:---|
@@ -277,8 +279,19 @@ Phase 2 imports the six physical structural relationship types that define the c
 | `SUBSCRIBES_TO` | Application / Library | Topic | Component reads messages from this topic channel. |
 | `ROUTES` | Broker | Topic | Broker manages queuing and routing for this topic. |
 | `RUNS_ON` | Application / Broker | Node | Process is hosted on and scheduled by this compute node. |
-| `CONNECTS_TO` | Node | Node | Physical or virtual network link between hosts. |
+| `CONNECTS_TO` | Node \| NetworkDevice | Node \| NetworkDevice | Physical or virtual network link (a cable): host-to-switch, switch-to-router, or host-to-host. |
 | `USES` | Application / Library | Library | Software compile/link-time dependency on a shared library. |
+
+#### Network Links (`CONNECTS_TO`)
+A `CONNECTS_TO` edge is a cable, not a dependency: it is stored once, in whichever direction the topology lists it, and every consumer reads it as **undirected**. A link may carry three optional properties:
+
+| Property | Type | Meaning |
+|:---|:---|:---|
+| `from_interface` | string | Port / NIC name on the `from` end (e.g. `eth0`, `uplink1`). |
+| `to_interface` | string | Port name on the `to` end (e.g. `port3`). |
+| `capacity_mbps` | float | Link capacity. Absent = unbounded (no congestion is modelled on it). Parallel links between the same pair add up (link aggregation). |
+
+Two topology styles are supported. The legacy **host mesh** links `Node`s directly (hosts act as routers), which is what the evaluation corpus in `data/scenarios/` uses. A **switched network** declares `network_devices` and links each host to a switch, and switches to routers ([`data/network/`](../data/network/) has an example; `docs/graph-generation.md` documents the generator's `network:` block). Nothing network-specific is computed for a mesh without capacities, so the corpus is unaffected.
 
 #### Topic Fan-Out Augmentation
 Immediately upon edge insertion, each Topic vertex is augmented with its degree metrics:
@@ -373,13 +386,26 @@ $$w(\text{broker}) = \left(\frac{1}{|T_{\text{routed}}|} \sum_{t \in T_{\text{ro
 A compute host's criticality equals the worst-case criticality among all software components running on it:
 $$w(\text{node}) = \max_{v \in \text{hosted}} w(v) \quad \text{where } (v, \text{node}) \in \text{RUNS\_ON}$$
 
+#### 6. NetworkDevice Weight ($w(\text{dev})$)
+A switch or router hosts nothing, so Phase 5a gives it the floor $w_{\min}$. Its real weight is set in Phase 5b, once Rule 7 has said which hosts depend on it (§6.3).
+
+### 5.5 Phase 5c: Baseline Network Load
+
+Runs only when the topology models its network (at least one `NetworkDevice`, or a link with `capacity_mbps`). The healthy system's direct pub-sub flows are routed over `CONNECTS_TO` ([`saag/core/network.py`](../saag/core/network.py)):
+
+- **Path**: publisher host → routing broker host → subscriber host (brokerless topics: publisher host → subscriber host), along shortest paths. Traffic is split evenly over equal-cost paths (ECMP). The routing broker is the lowest-id live broker that both ends can reach. A component is placed on the lowest-id of its `RUNS_ON` hosts.
+- **Offered load**: each publisher emits $\text{size}(t) \cdot f_t \cdot 8 / 10^6$ Mbps of its topic (the message-flow simulator's rate model). The publisher→broker leg is counted once per (publisher, topic, broker), and the broker→subscriber leg once per subscriber.
+- **Stored**: each link gets `load_mbps` and, if it has a capacity, `utilization` $= \text{load}/\text{capacity}$. Each host and device gets `max_link_utilization` (worst link) and `link_load_mbps` (total on its links).
+
+These are descriptive metrics (`saag/core/metric_registry.py`). They feed no RM score, are not exported, and are recomputed on every import. Library-mediated publishing is not routed, because libraries have no host.
+
 ---
 
 ## 6. Stage 2 (Pre-Analysis): Dependency Derivation & Edge Finalization
 
-When analysis is requested (`client.analyze()` or `cli/analyze_graph.py`), the system executes Stage 2: synthesizing the logical `DEPENDS_ON` edges across six formal architectural derivation rules.
+When analysis is requested (`client.analyze()` or `cli/analyze_graph.py`), the system executes Stage 2: synthesizing the logical `DEPENDS_ON` edges across seven formal architectural derivation rules.
 
-### 6.1 Phase 4: The Six Dependency Derivation Rules
+### 6.1 Phase 4: The Seven Dependency Derivation Rules
 
 Each rule transforms structural relationships into directed causal dependencies.
 
@@ -402,6 +428,9 @@ classDiagram
     }
     class Rule6_BrokerToBroker {
         Broker_1 <--> Broker_2 : via Shared Host Node
+    }
+    class Rule7_NodeToDevice {
+        Node_B --> Device : separates Node_B from a dependency host
     }
 ```
 
@@ -453,6 +482,14 @@ classDiagram
 - **Derived Edge**: Bidirectional edges $\text{Broker}_1 \xleftrightarrow{\text{DEPENDS\_ON}} \text{Broker}_2$ (`dependency_type: 'broker_to_broker'`)
 - **Rationale**: Brokers sharing a compute node compete for memory and network sockets, and crash simultaneously if the node fails.
 - **Edge Weight ($w_E$)**: Initialized with placeholder $0.01$, then finalized in Phase 5b to inherit the shared Node's weight.
+
+#### Rule 7: `node_to_device` (Host-to-Network Dependency)
+- **Pattern**: Host $B$ has a `node_to_node` dependency on host $A$ (Rule 3). Both hosts are in the same island of the intact `CONNECTS_TO` network, and removing the switch/router $d$ disconnects them. In other words, every network path from $B$ to $A$ crosses $d$:
+  $$\text{Node } B \xrightarrow{\text{DEPENDS\_ON}} \text{Node } A \;\wedge\; d \text{ separates } B \text{ from } A$$
+- **Derived Edge**: $\text{Node } B \xrightarrow{\text{DEPENDS\_ON}} \text{NetworkDevice } d$ (`dependency_type: 'node_to_device'`)
+- **Edge Weight ($w_E$)**: Worst-case lift over the carried dependencies, $\max_{A} w_E(B \to A)$ (the same operator as Rules 3–4). `path_count` is the number of carried dependencies.
+- **Rationale**: Redundancy removes the edge. With two core routers, neither separates anything, so neither gets a dependent. A single-homed host's top-of-rack switch always does. Only `NetworkDevice`s are targets: hosts that route traffic in a legacy mesh never are, so a mesh without devices derives no Rule 7 edges.
+- **Implementation**: A separator test is not expressible in Cypher. All three engines call the shared helper `saag.core.network.derive_node_to_device`, which runs one connectivity check per device.
 
 ---
 
@@ -506,6 +543,9 @@ Because Phase 4 establishes edges whose weights depend on aggregate component we
 2. **`broker_to_broker` Node Weight**:
    $$w_E(\text{Broker}_1 \to \text{Broker}_2) = \max_{n \in \text{shared\_nodes}} w(n)$$
    The edge reflects the severity of losing the host hardware that both brokers depend upon.
+3. **NetworkDevice Weight (Rule 7)**:
+   $$w(\text{dev}) = \max_{(n, \text{dev}) \in \text{node\_to\_device}} w(n) \quad (\text{floor } w_{\min})$$
+   A switch or router carries the worst-case weight of the hosts that depend on it, the same lift a host gets from what it runs. `SimulationGraph` re-derives this value instead of reading it.
 
 ---
 
@@ -515,7 +555,7 @@ Software-as-a-Graph implements graph construction and dependency derivation in *
 
 1. **`Neo4jRepository`** ([`saag/infrastructure/neo4j_repo.py`](../saag/infrastructure/neo4j_repo.py)): High-performance enterprise implementation using Cypher batch queries and ACID transactions.
 2. **`MemoryRepository`** ([`saag/infrastructure/memory_repo.py`](../saag/infrastructure/memory_repo.py)): Pure Python / NetworkX dictionary engine for testing, local dry-runs, and environments without Neo4j.
-3. **`SimulationGraph`** ([`saag/simulation/service.py`](../saag/simulation/service.py)): Simulation engine that independently derives the same six dependency rules from raw structural edges for change-propagation testing ($I_M(v)$).
+3. **`SimulationGraph`** ([`saag/simulation/service.py`](../saag/simulation/service.py)): Simulation engine that independently derives the same seven dependency rules from raw structural edges for change-propagation testing ($I_M(v)$).
 
 > [!TIP]
 > Parity across all three engines is continuously enforced by automated CI regression tests:
@@ -532,9 +572,9 @@ $$\pi_\ell(\mathcal{G}) = \mathcal{G}_\ell = (V_\ell, E_\ell, \tau_V|_{\ell}, \t
 
 ```mermaid
 graph TD
-    System["System Layer (π_system)<br/>All 5 Entity Types | All 6 Dependency Types"]
+    System["System Layer (π_system)<br/>All 6 Entity Types | All 7 Dependency Types"]
     System --> App["Application Layer (π_app)<br/>Apps + Libraries<br/>app_to_app, app_to_lib<br/>Focus: Reliability"]
-    System --> Infra["Infrastructure Layer (π_infra)<br/>Nodes<br/>node_to_node<br/>Focus: Availability"]
+    System --> Infra["Infrastructure Layer (π_infra)<br/>Nodes + NetworkDevices<br/>node_to_node, node_to_device<br/>Focus: Availability"]
     System --> MW["Middleware Layer (π_mw)<br/>Brokers (with App/Node context)<br/>app_to_broker, node_to_broker, broker_to_broker<br/>Focus: Maintainability"]
 ```
 
@@ -543,9 +583,9 @@ graph TD
 | Layer | CLI Flag | Subgraph Vertices ($T_\ell$) | Included Dependencies ($D_\ell$) | Analyzed Types ($T_a$) | Architectural Focus |
 |:---|:---|:---|:---|:---|:---|
 | **Application** | `--layer app` | Application, Library | `app_to_app`, `app_to_lib` | Application, Library | **Reliability ($R$)**: Microservice cascades, pub-sub starvation, shared-library blast radius. |
-| **Infrastructure** | `--layer infra` | Node | `node_to_node` | Node | **Availability ($A$)**: Host partition risk, network bridges, single points of failure (SPOF). |
+| **Infrastructure** | `--layer infra` | Node, NetworkDevice | `node_to_node`, `node_to_device` | Node, NetworkDevice | **Availability ($A$)**: Host partition risk, network bridges, single points of failure (SPOF), non-redundant switches/routers. |
 | **Middleware** | `--layer mw` | Application, Broker, Node | `app_to_broker`, `node_to_broker`, `broker_to_broker` | Broker | **Maintainability ($M$)**: Broker throughput bottlenecks, colocation risks, queue exhaustion. |
-| **System** | `--layer system` | All 5 entity types | All 6 dependency types | All components | **Holistic Composite ($Q$)**: End-to-end multi-tier risk evaluation. |
+| **System** | `--layer system` | All 6 entity types | All 7 dependency types | All components | **Holistic Composite ($Q$)**: End-to-end multi-tier risk evaluation. |
 
 #### Architectural Scope Constraints
 - **Why are Libraries included in $\pi_{\text{app}}$?**
@@ -638,6 +678,24 @@ The input specification is a declarative JSON document defining architectural co
     "uses": [
       { "from": "A0", "to": "L0" },
       { "from": "A1", "to": "L0" }
+    ]
+  }
+}
+```
+
+**Switched network (optional).** To model switches and routers, list them under `network_devices` and connect hosts to them. Links may carry interfaces and a capacity (§5.2):
+
+```json
+{
+  "network_devices": [
+    { "id": "SW0", "name": "tor-0", "role": "switch" },
+    { "id": "RT0", "name": "core-0", "role": "router" }
+  ],
+  "relationships": {
+    "connects_to": [
+      { "from": "N0", "to": "SW0", "from_interface": "eth0", "to_interface": "port0", "capacity_mbps": 1000 },
+      { "from": "N1", "to": "SW0", "from_interface": "eth0", "to_interface": "port1", "capacity_mbps": 1000 },
+      { "from": "SW0", "to": "RT0", "from_interface": "uplink0", "to_interface": "port0", "capacity_mbps": 10000 }
     ]
   }
 }

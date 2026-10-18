@@ -211,6 +211,44 @@ class QosStats:
 
 
 @dataclass
+class NetworkConfig:
+    """Switched physical network replacing the host-to-host CONNECTS_TO mesh.
+
+    ``two_tier``: hosts are shuffled into racks of ``hosts_per_rack`` behind
+    one top-of-rack switch each, and every switch uplinks to every one of the
+    ``core_routers``. Capacities (Mbps) are optional; without them links are
+    unbounded and only reachability is modelled.
+    """
+    topology: str = "two_tier"
+    hosts_per_rack: int = 4
+    core_routers: int = 2
+    host_link_mbps: Optional[float] = None
+    uplink_mbps: Optional[float] = None
+
+    TOPOLOGIES = ("two_tier",)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "NetworkConfig":
+        cfg = cls(**{k: data[k] for k in (
+            "topology", "hosts_per_rack", "core_routers", "host_link_mbps", "uplink_mbps",
+        ) if k in data})
+        if cfg.topology not in cls.TOPOLOGIES:
+            raise ValueError(f"network.topology must be one of {cls.TOPOLOGIES}, got {cfg.topology!r}")
+        if cfg.hosts_per_rack < 1 or cfg.core_routers < 1:
+            raise ValueError("network.hosts_per_rack and network.core_routers must be >= 1")
+        return cfg
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "topology": self.topology,
+            "hosts_per_rack": self.hosts_per_rack,
+            "core_routers": self.core_routers,
+            "host_link_mbps": self.host_link_mbps,
+            "uplink_mbps": self.uplink_mbps,
+        }
+
+
+@dataclass
 class GraphConfig:
     """Configuration for graph generation with statistical distributions."""
     nodes: int = 8
@@ -236,6 +274,9 @@ class GraphConfig:
     # the declared QoS. Only the Amendment 7 control corpus sets it; the committed
     # corpus is generated with the default and stays byte-identical.
     qos_affinity: bool = True
+    # Optional switched network (YAML ``network:`` block). None keeps the
+    # host-to-host mesh, so the committed corpus stays byte-identical.
+    network: Optional[NetworkConfig] = None
     
     @classmethod
     def from_scale(cls, scale: str, seed: int = 42) -> "GraphConfig":
@@ -281,6 +322,7 @@ class GraphConfig:
             scenario=graph_data.get("scenario"),
             intra_cluster_coupling=graph_data.get("intra_cluster_coupling", 0.65),
             connection_density=graph_data.get("connection_density", 0.3),
+            network=NetworkConfig.from_dict(graph_data["network"]) if graph_data.get("network") else None,
         )
     
     def to_scale_dict(self) -> Dict[str, int]:
@@ -304,4 +346,6 @@ class GraphConfig:
             "intra_cluster_coupling": self.intra_cluster_coupling,
             "connection_density": self.connection_density,
         })
+        if self.network is not None:
+            base["network"] = self.network.to_dict()
         return base

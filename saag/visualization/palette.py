@@ -69,6 +69,7 @@ TYPE_COLORS: Dict[str, str] = {
     "Node":        "#185FA5",
     "Topic":       "#993C1D",
     "Library":     "#3B6D11",
+    "NetworkDevice": "#5F5E5A",
 }
 
 # ── Component shapes for Cytoscape network graph ──────────────────────────────
@@ -78,6 +79,7 @@ TYPE_SHAPES: Dict[str, str] = {
     "Topic":       "ellipse",
     "Library":     "hexagon",
     "Node":        "barrel",
+    "NetworkDevice": "triangle",
 }
 
 

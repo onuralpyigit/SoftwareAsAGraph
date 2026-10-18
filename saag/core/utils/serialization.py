@@ -14,6 +14,7 @@ from saag.core.models import (
     QoSPolicy,
     canonical_criticality,
 )
+from saag.core.network import LINK_PROPERTIES
 
 #: Flat property name -> nested key, grouped by ``code_metrics`` section.
 CODE_METRIC_FIELDS: Dict[str, Dict[str, str]] = {
@@ -184,6 +185,7 @@ _RECONSTRUCT_BY_TYPE = {
     "Library": lambda props: {"version": props["version"]} if props.get("version") else {},
     "Node": lambda props: _present_keys(props, ("ip_address", "cpu_cores", "memory_gb", "os_type")),
     "Broker": lambda props: _present_keys(props, ("type", "max_connections", "host")),
+    "NetworkDevice": lambda props: _present_keys(props, ("role",)),
 }
 
 def reconstruct_export_payload(graph_data: GraphData, metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -208,7 +210,8 @@ def reconstruct_export_payload(graph_data: GraphData, metadata: Dict[str, Any]) 
         "Broker": "brokers",
         "Topic": "topics",
         "Application": "applications",
-        "Library": "libraries"
+        "Library": "libraries",
+        "NetworkDevice": "network_devices",
     }
     
     # Process components
@@ -216,6 +219,8 @@ def reconstruct_export_payload(graph_data: GraphData, metadata: Dict[str, Any]) 
         category = type_to_category.get(comp.component_type)
         if not category:
             continue
+        # Only systems that model switches/routers carry the key at all.
+        data.setdefault(category, [])
             
         comp_dict = reconstruct_component_dict(comp)
         data[category].append(comp_dict)
@@ -227,6 +232,8 @@ def reconstruct_export_payload(graph_data: GraphData, metadata: Dict[str, Any]) 
             edge_dict = {"from": edge.source_id, "to": edge.target_id, "weight": edge.weight}
             
             # Include metadata for DEPENDS_ON
+            if edge.relation_type == "CONNECTS_TO":
+                edge_dict.update(_present_keys(edge.properties, LINK_PROPERTIES))
             if edge.relation_type == "DEPENDS_ON":
                 edge_dict.update({
                     "dependency_type": edge.dependency_type,
@@ -359,4 +366,5 @@ _FLATTEN_BY_TYPE = {
         "max_connections": comp.get("max_connections", 0),
         "host": comp.get("host", ""),
     },
+    "NetworkDevice": lambda comp: {"role": comp.get("role", "switch")},
 }

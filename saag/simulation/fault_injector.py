@@ -73,7 +73,7 @@ import random
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
 
@@ -83,6 +83,7 @@ from .simulation_results import (
     FaultInjectionResult,
 )
 from saag.core.models import QoSPolicy, topic_weight_from_node_attrs
+from saag.core.network import NETWORK_TYPES, Fabric, evaluate
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,10 @@ class _PubSubIndex:
         self.topic_routers: Dict[str, Set[str]] = defaultdict(set)
         # host_id → set of component_ids deployed on it (inverse of RUNS_ON)
         self.host_residents: Dict[str, Set[str]] = defaultdict(set)
+        # component_id → host_ids it RUNS_ON
+        self.hosts_of: Dict[str, List[str]] = defaultdict(list)
+        # CONNECTS_TO links, read as undirected cables
+        self.net_links: List[Tuple[str, str, Optional[float]]] = []
         # node metadata
         self.node_type: Dict[str, str] = {}
         self.node_name: Dict[str, str] = {}
@@ -149,6 +154,9 @@ class _PubSubIndex:
                 self.topic_routers[tgt].add(src)
             elif etype == "RUNS_ON":
                 self.host_residents[tgt].add(src)
+                self.hosts_of[src].append(tgt)
+            elif etype == "CONNECTS_TO":
+                self.net_links.append((src, tgt, data.get("capacity_mbps")))
 
         self.all_subscribers: Set[str] = {
             a for a, subs in self.app_subscribes.items() if subs
@@ -221,6 +229,12 @@ class FaultInjector:
         Per-wave decay of the failure probability, ``max(floor, 1 - wave *
         step)``.  Defaults 0.15 and 0.25 reproduce the published labels; they
         are exposed only for the oracle-sensitivity sweep.
+    network_gating : bool, optional
+        Count a subscriber's feed as lost while the CONNECTS_TO network (hosts,
+        switches, routers) no longer connects it to any live publisher through a
+        live routing broker.  Gives Node and NetworkDevice failures labels of
+        their own.  Reachability only (no congestion).  Off by default, which
+        keeps the published labels; a no-op on graphs without CONNECTS_TO.
     """
 
     #: Accepted values for ``qos_factor_mode``.
@@ -237,6 +251,7 @@ class FaultInjector:
         strict_labels: bool = False,
         depth_damp_step: float = 0.15,
         depth_damp_floor: float = 0.25,
+        network_gating: bool = False,
     ) -> None:
         if qos_factor_mode not in self.QOS_FACTOR_MODES:
             raise ValueError(
@@ -286,6 +301,13 @@ class FaultInjector:
         self.cascade_depth_limit = cascade_depth_limit
         self.propagation_threshold = max(0.0, min(1.0, propagation_threshold))
         self._index = _PubSubIndex(self.graph)
+        self._fabric: Optional[Fabric] = None
+        if network_gating and self._index.net_links:
+            self._fabric = Fabric(
+                [n for n, t in self._index.node_type.items() if t in NETWORK_TYPES],
+                self._index.net_links,
+            )
+        self._baseline_cut = self._network_cut(set())
         self._topic_weights = self._compute_topic_weights()
         self._mean_topic_weight = (
             sum(self._topic_weights.values()) / len(self._topic_weights)
@@ -566,6 +588,45 @@ class FaultInjector:
             impact_score_std=round(std_score, 6),
         )
 
+    def _network_cut(self, failed: Set[str]) -> Dict[str, Set[str]]:
+        """subscriber → topics it still subscribes to but the network no longer delivers.
+
+        A feed is cut when the topic has live publishers (and, if brokered, live
+        routing brokers) yet no live path joins any of them to the subscriber.
+        Subscribers that failed in the cascade keep their cut feeds -- the cut is
+        why they failed -- but one whose own host is down is not cut off by the
+        network, so it is left out. Empty without network gating.
+        """
+        if self._fabric is None:
+            return {}
+        idx = self._index
+
+        def host_down(comp: str) -> bool:
+            hosts = idx.hosts_of.get(comp)
+            return bool(hosts) and all(h in failed for h in hosts)
+
+        flows = [
+            (p, t, s)
+            for t in sorted(idx.all_topics)
+            for p in sorted(idx.publishers_of(t) - failed)
+            for s in sorted(idx.subscribers_of(t))
+            if p != s and not host_down(s)
+        ]
+        state = evaluate(
+            self._fabric, flows, idx.hosts_of,
+            live_routers={t: sorted(idx.live_routers_of(t, failed)) for t in idx.all_topics},
+            brokered=[t for t in idx.all_topics if idx.topic_routers.get(t)],
+            topic_load={}, down=failed & self._fabric.vertices, with_load=False,
+        )
+        reached: Set[Tuple[str, str]] = set()
+        blocked: Set[Tuple[str, str]] = set()
+        for (p, t, s), loss in state.flow_loss.items():
+            (blocked if loss >= 1.0 else reached).add((s, t))
+        cut: Dict[str, Set[str]] = defaultdict(set)
+        for s, t in sorted(blocked - reached):
+            cut[s].add(t)
+        return cut
+
     def _cascade(self, node_id: str, node_type: str, seed: int) -> "_SingleSeedResult":
         """
         Run one softened cascade simulation with a specific seed.
@@ -591,6 +652,27 @@ class FaultInjector:
             return 10.0
 
         get_qos_factor = self._qos_factor
+
+        # Network gating: feeds the live network no longer delivers count as fully
+        # lost. Feeds the healthy network never delivered are not this failure's.
+        cut_cache: Dict[frozenset, Dict[str, Set[str]]] = {}
+
+        def network_cut() -> Dict[str, Set[str]]:
+            if self._fabric is None:
+                return {}
+            key = frozenset(failed_nodes)
+            if key not in cut_cache:
+                now = self._network_cut(failed_nodes)
+                cut_cache[key] = {
+                    s: ts - self._baseline_cut.get(s, set())
+                    for s, ts in now.items() if ts - self._baseline_cut.get(s, set())
+                }
+            return cut_cache[key]
+
+        def feed_loss(topic_loss: Dict[str, float], cut: Dict[str, Set[str]], sub: str, topic: str) -> float:
+            if topic in cut.get(sub, ()):
+                return 1.0
+            return topic_loss.get(topic, 0.0)
 
         def compute_topic_loss() -> Dict[str, float]:
             """Soft per-topic feed loss given the current `failed_nodes` state."""
@@ -709,6 +791,7 @@ class FaultInjector:
             # --- Phase B: Topic-mediated Soft QoS/Rate-weighted Propagation ---
             # 1. Compute soft topic feed loss based on failed publishers
             topic_loss = compute_topic_loss()
+            cut = network_cut()
 
             # 2. Update orphaned/directly_orphaned sets based on fractional feed loss
             for topic, loss in topic_loss.items():
@@ -725,6 +808,10 @@ class FaultInjector:
                         if sub not in impacted_subscribers:
                             wave_new_impacted.add(sub)
                             impacted_subscribers.add(sub)
+            for sub in sorted(cut):
+                if sub not in failed_nodes and sub not in impacted_subscribers:
+                    wave_new_impacted.add(sub)
+                    impacted_subscribers.add(sub)
 
             # 3. Stochastic failure of impacted subscribers based on continuous average feed loss
             # Sorted because `all_subscribers` is a set: iteration order over a
@@ -740,7 +827,7 @@ class FaultInjector:
                 all_feeds = idx.app_subscribes.get(sub, set())
                 if not all_feeds:
                     continue
-                sub_loss = sum(topic_loss.get(t, 0.0) for t in sorted(all_feeds)) / len(all_feeds)
+                sub_loss = sum(feed_loss(topic_loss, cut, sub, t) for t in sorted(all_feeds)) / len(all_feeds)
                 
                 if sub_loss >= self.propagation_threshold and sub_loss > 1e-6:
                     # Failure probability scaled by propagation_threshold
@@ -769,6 +856,7 @@ class FaultInjector:
         # subscribers failed in the last wave) rather than reusing the loop's
         # last in-progress `topic_loss`, which predates that wave's failures.
         final_topic_loss = compute_topic_loss()
+        final_cut = network_cut()
         per_sub_loss: Dict[str, float] = {}
         for sub in sorted(idx.all_subscribers):
             all_feeds = idx.app_subscribes.get(sub, set())
@@ -776,7 +864,7 @@ class FaultInjector:
                 per_sub_loss[sub] = 0.0
                 continue
             per_sub_loss[sub] = sum(
-                final_topic_loss.get(t, 0.0) for t in sorted(all_feeds)) / len(all_feeds)
+                feed_loss(final_topic_loss, final_cut, sub, t) for t in sorted(all_feeds)) / len(all_feeds)
 
         total_subs = len(idx.all_subscribers)
         # `per_sub_loss` is now insertion-ordered by sorted subscriber id, so this
