@@ -235,6 +235,12 @@ class FaultInjector:
         live routing broker.  Gives Node and NetworkDevice failures labels of
         their own.  Reachability only (no congestion).  Off by default, which
         keeps the published labels; a no-op on graphs without CONNECTS_TO.
+    replica_aware : bool, optional
+        A Node outage kills a resident only when every host it RUNS_ON is
+        down, so a hot-standby component survives the loss of one replica.
+        Single-fault injection means that happens only for single-hosted
+        residents.  Off by default, which keeps the published labels: any one
+        host failure kills a multi-hosted component.
     """
 
     #: Accepted values for ``qos_factor_mode``.
@@ -252,6 +258,7 @@ class FaultInjector:
         depth_damp_step: float = 0.15,
         depth_damp_floor: float = 0.25,
         network_gating: bool = False,
+        replica_aware: bool = False,
     ) -> None:
         if qos_factor_mode not in self.QOS_FACTOR_MODES:
             raise ValueError(
@@ -263,6 +270,7 @@ class FaultInjector:
         self.strict_labels = strict_labels
         self.depth_damp_step = depth_damp_step
         self.depth_damp_floor = depth_damp_floor
+        self.replica_aware = replica_aware
         self.graph = graph.copy()
         
         # Derive DEPENDS_ON edges dynamically if they are missing
@@ -751,9 +759,14 @@ class FaultInjector:
         # with it, simultaneously. This is the RUNS_ON blast of Rule 6, and it is
         # the only failure mode in this engine that starts with more than one
         # dead component. For every other injected type `residents_of` is empty,
-        # so this cannot perturb their labels.
+        # so this cannot perturb their labels. Replica-aware, a resident with a
+        # live replica on another host survives.
         if node_type == "Node":
-            residents = sorted(idx.residents_of(node_id) - failed_nodes)
+            residents = idx.residents_of(node_id) - failed_nodes
+            if self.replica_aware:
+                residents = {r for r in residents
+                             if all(h in failed_nodes for h in idx.hosts_of[r])}
+            residents = sorted(residents)
             failed_nodes.update(residents)
             frontier.extend(residents)
 

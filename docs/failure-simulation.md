@@ -31,6 +31,7 @@
    - 5.5 [Flow Disruption & Baseline Flow Priming](#55-flow-disruption--baseline-flow-priming)
    - 5.6 [Relationship Criticality ($I_{\text{edge}}(u,v)$)](#56-relationship-criticality-i_textedgeuv)
    - 5.6a [Network Gating: Switches, Routers & Link Capacity](#56a-network-gating-switches-routers--link-capacity)
+   - 5.6b [Replica-Aware Host Failure](#56b-replica-aware-host-failure)
    - 5.7 [How to Run `FailureSimulator`](#57-how-to-run-failuresimulator)
    - 5.8 [Academic Provenance & Quality Gating Roles](#58-academic-provenance--quality-gating-roles)
 6. [Engine 3: `EventSimulator` (Built-In Discrete-Event Engine — Supporting Baseline)](#6-engine-3-eventsimulator-built-in-discrete-event-engine--supporting-baseline)
@@ -569,6 +570,18 @@ By default the NETWORK cascade is the legacy host-isolation rule: a failed `Node
 Both are off by default. With gating off, a topology with devices still loads, but device failures only score fragmentation, and a warning is logged.
 
 `FaultInjector(network_gating=True)` applies the reachability rule (not congestion) to $I^*$: a feed the live network no longer delivers counts as fully lost. Pass `--node-types ...,Node,NetworkDevice` to label hosts and devices.
+
+### 5.6b Replica-Aware Host Failure
+
+By default, both oracles treat a component that `RUNS_ON` several `Node`s (a hot-standby replica) as dying when **any one** of its hosts fails. That is how the published labels were produced. Under that rule a replica adds exposure instead of redundancy, so any placement, redundancy or anti-affinity comparison would be scored backwards.
+
+Pass `replica_aware=True` to get the opposite rule. A host outage takes a component down only when **all** of its hosts are down. The flag is threaded the same way as `network_gating`: `FaultInjector(replica_aware=True)`, `FailureSimulator(replica_aware=True)`, `SimulationService(..., replica_aware=True)` and `GraphEvaluator(replica_aware=True)`. On the CLI it is `--replica-aware` on `saag-simulate fault-inject`.
+
+- **`FaultInjector` ($I^*$).** In wave 0 of a `Node` injection, a resident fails only if every host in its `hosts_of` list is failed. Injection is single-fault, so in an $I^*$ sweep this means multi-hosted residents survive and single-hosted ones still die.
+- **`FailureSimulator` ($I_{\text{comp}}$).** The physical cascade gives a hosted component the impact of its *least*-impacted host, $\min_{h \in \text{hosts}(c)} \text{impact}(h)$. This is the same `min()` rule that broker redundancy already uses. A joint outage, `FailureScenario(target_ids=["N1", "N2"])`, kills a component replicated on exactly those two hosts. The fragmentation projection also attaches a multi-hosted component to every host it declares. Without that, `SimulationGraph._hosted_on` keeps only the *last* declared host, so a surviving replica whose last host failed would be counted as a stranded island.
+- **What it does not model.** A surviving replica carries the full load: there is no capacity loss and no failover delay. Topic semantics are unchanged. `FaultInjector` already scores a topic with several distinct publishers by rate-weighted fractional loss, and `FailureSimulator` averages publisher impact against the starvation bound. There is no k-of-n quorum rule. `SimulationGraph.get_dependency_edges()` still lifts Rules 3–4 through `_hosted_on`, because its arc set has to match `MemoryRepository` (see `tests/test_simulation_dependency_derivation.py`). The flag has no effect on `MessageFlowSimulator`, which does not model hosts.
+
+With the flag off, every label is byte-identical to the pre-flag code. With the flag on, only `Node` labels move, and on a corpus with no replicas the flag is a no-op (`tests/test_replica_aware.py`). Measured $I^*$ for seeds 42/123/456 with the flag on (atm has 14 of 31 hosted components multi-hosted; av has 30 of 84): atm N0 0.396 → 0.000, N1 0.692 → 0.656, N3 0.562 → 0.491; av N1 0.947 → 0.032. The other `Node`s move by seed noise at most.
 
 ---
 

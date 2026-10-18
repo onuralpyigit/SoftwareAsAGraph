@@ -40,6 +40,7 @@ Column legend:
 | A1 | Aleti, Buhnova, Grunske, Koziolek & Meedeniya, **Software Architecture Optimization Methods: A Systematic Literature Review** | IEEE TSE 39, 2013 (DOI 10.1109/TSE.2012.64) | Survey (188 papers) | — | — | — | — | Taxonomy | — | — | ❌ (volume/pages need checking) |
 | A2 | Aleti, Björnander, Grunske & Meedeniya, **ArcheOpterix** | ICSE 2009 workshop (MOMPES vs. WoSQ: sources disagree) | Embedded, AADL models | AADL architecture | Deployment | Multiple quality attributes | n/v | Evolutionary, Pareto | Experiments from initial deployments | n/v | ❌ |
 | A3 | Koziolek, Koziolek & Reussner, **PerOpteryx** (tactics-guided) | QoSA-ISARCS 2011, pp. 33–42; earlier Martens et al., WOSP/SIPEW 2010 | Component-based (Palladio models) | Palladio Component Model | Allocation, server configuration, component selection | Performance, reliability, cost | Model-based reliability (PCM) | NSGA-II with architectural tactics | Business reporting system, ABB control system | ✅ ABB | ❌ |
+| A4 | Nazari, Thiruvady, Aleti & Moser, **A mixed integer linear programming model for reliability optimisation in the component deployment problem** | J. Oper. Res. Soc. 67(8):1050–1060, 2016 (DOI 10.1057/jors.2015.119) | Component deployment (same group as C4) | n/v | Component → hardware host | Reliability | n/v | **MILP** (linearizes the non-linear reliability function); benchmarked against earlier heuristics/metaheuristics | n/v | n/v | ❌ |
 
 ### 1.3 Automotive and embedded deployment
 
@@ -62,6 +63,10 @@ Column legend:
 | F5 | Cheng, Nguyen & Bhargava, **Resilient edge service placement under demand and node failure uncertainties** (arXiv 2107.04748) | arXiv | n/v | Robust cost | Node failures | Adaptive robust optimization | n/v | ❌ |
 | F6 | **IRENE** | CLOSER 2020 | n/v | Availability, interference | n/v | Genetic algorithm | n/v | ❌ |
 | F7 | Le Duc et al., survey of ML for reliable resource provisioning in edge-cloud | ACM CSUR, 2020 | — | — | — | Survey | — | ❌ |
+| F8 | Pongthawornkamol, Nahrstedt & Wang, **Reliability and timeliness analysis of fault-tolerant distributed publish/subscribe systems** | USENIX ICAC 2013 | Pub-sub (analytic model) | Reliability and timeliness; covers broker deployment and reliability optimization (per abstract) | Component failures + recovery | Analytic model | n/v | ❌ |
+| F9 | **Algorithms for optimal replica placement under correlated failure in hierarchical failure domains** (arXiv 1701.01539) | arXiv, 2017 | Hierarchical failure domains | Explicit objective for replica placement under correlated failure | Correlated (domain) failures | n/v | n/v | ❌ |
+| F10 | **Failure-resilient and carbon-efficient deployment of microservices over the cloud-edge continuum** (arXiv 2601.04123) | arXiv, 2026 | n/v | Resilience + carbon | Historical failure data → soft affinity / anti-affinity / avoid constraints | Constraint generation, then placement | n/v | ❌ |
+| F11 | Zhai, Chen, Wolinsky & Ford, **Heading off correlated failures through Independence-as-a-Service** (INDaaS) | OSDI 2014 | Fault graphs over network/hardware/software dependencies; "risk groups" | Audit the independence of redundant deployments (no placement search) | Hidden shared dependencies | Pluggable dependency acquisition + auditing | ✓ three case studies | ❌ |
 
 ### 1.5 Learned (GNN / RL) placement
 
@@ -304,6 +309,11 @@ has been seen at abstract level)
       SE-side backbone.
 - [ ] Check for **DDS- and ROS 2-specific** placement work beyond C2/C3 (for example, the
       transport-selection framework of De Marchi & Bombieri, 2024, and FogROS2-Config).
+- [ ] Read F8 (Pongthawornkamol et al., ICAC 2013). It is the only pub-sub-specific
+      reliability work with a deployment angle found so far (added 2026-10-18), so it is
+      the most direct threat to the "pub-sub/topic-level model" row of §2.
+- [ ] Read A4 (Nazari et al., JORS 2016). An exact MILP for reliability-driven component
+      deployment already exists, so "we formulate an exact MILP" cannot be a contribution.
 
 ---
 
@@ -322,3 +332,151 @@ has been seen at abstract level)
 **Boundary with AuSE:** AuSE verifies *individual edits* to an existing deployment after
 the fact. This paper *synthesizes a whole placement* under resource constraints. Both
 manuscripts must state this explicitly.
+
+---
+
+## 7. Probe evidence (2026-10-18)
+
+Two read-only probes test claim 4 and the ScatterD question from §3 against the existing
+oracles. Neither changes `saag/`, the corpus or any published label. Results are written to
+`results/`, which is gitignored.
+
+- [reproduce/placement_objective_probe.py](../../../reproduce/placement_objective_probe.py)
+  places one host per component. It then scores Node injection under I* and I_comp, with
+  uniform p over hosts, using 3 placement seeds.
+- [reproduce/placement_redundancy_probe.py](../../../reproduce/placement_redundancy_probe.py)
+  adds replicas and correlated failures. Hosts are grouped into domains of 2, and the probe
+  runs on the opt-in `replica_aware` flag.
+
+**7.1 Replica semantics decide the answer.** With the flag off (the published semantics),
+both oracles kill a replicated component when *any* one of its hosts fails. A real flag run
+matches an emulated all-hosts-down run exactly (max |Δ| = 0 on atm and av). The probe then
+places replicas cross-domain (anti-affinity) instead of in-domain and measures the change in
+I_comp, meaning cross_domain − same_domain, under domain outages:
+
+| scenario | flag off: mean / max | flag on: mean / max |
+|---|---|---|
+| atm | +0.160 / +0.095 (worse, 6/6) | −0.169 / −0.142 (better, 6/6) |
+| av | +0.097 / +0.063 (worse, 6/6) | −0.123 / −0.146 (better, 6/6) |
+
+Under the published semantics, anti-affinity is scored as harmful. Any placement result
+computed without the flag would recommend the opposite of standard practice.
+
+**7.2 I\* is a weak placement objective.**
+- On av, Node I* is ≈0.95 for every host and ≈0.96 for every domain, whatever the placement.
+  It cannot discriminate between placements.
+- Under domain outages, max I* never moves with replica policy.
+- I_comp with the legacy mesh rule scores empty hosts above zero.
+- Neither oracle is a clean placement score as it stands.
+
+**7.3 Locality vs expected impact (claim 4).**
+
+Consolidation trades expected impact for worst case:
+- Consolidating onto one host gives the lowest expected I* and the highest worst-case I* on
+  atm, av and realworld_autoware_ros2. On atm, E[I*] is 0.125 vs 0.532 for round-robin,
+  while max I* is 1.000 vs 0.775.
+- Spearman ρ(locality, E[I*]) is −0.86, −0.60 and −0.85, and ρ(locality, max I*) is +0.66,
+  +0.59 and +0.61.
+
+**Caveat.** Most of the expected-impact gain comes from *using fewer hosts*: empty hosts
+contribute 0 under uniform p. That is the textbook series-system effect, not a pub-sub
+finding. A claim needs a comparison at a fixed number of used hosts. The closest such
+comparison, colocate vs round_robin (both use every host), favours colocation:
+- under I_comp, on 3/3 scenarios (0.260 vs 0.271, 0.232 vs 0.243, 0.316 vs 0.359);
+- under I*, on 2/3 scenarios (on av colocation is worse, 0.953 vs 0.914).
+
+The effect is small.
+
+**7.4 Does redundancy create the tension?** Only weakly.
+- On atm under I* (flag on, domain outages), the ranking flips once replicas are
+  anti-affine. Without replicas, colocate beats round_robin on E[I*] (0.660 vs 0.680). With
+  cross-domain replicas, round_robin wins (0.609 vs 0.655) at a higher cross-domain traffic
+  share (0.76 vs 0.67).
+- I_comp shows no flip: colocate wins in both arms.
+- The probe's cost proxy counts primary-to-primary traffic only, so it gives replica
+  placement no cost at all. Anti-affinity therefore looks free. A real tension needs a cost
+  for replica synchronization traffic and replica capacity.
+- n = 3 seeds and 2 scenarios. Treat this as directional.
+
+**Implications for §3.**
+- Claim 4 survives only in its narrow form: *the risk measure, not the topology, decides
+  whether co-location helps.* It must be shown at a fixed number of used hosts, and with a
+  replica cost model.
+- Every placement experiment must run with `replica_aware=True`, and the paper must say so.
+- The oracle used to evaluate a placement must not be the one it was optimized on. I* is
+  disqualified on av-like topologies by saturation.
+
+**7.5 Consolidation at a fixed host count.**
+[reproduce/placement_tradeoff_probe.py](../../../reproduce/placement_tradeoff_probe.py),
+Part C, removes the fewer-hosts confound:
+- k used hosts, loads balanced and fixed, one host per component, `replica_aware` on.
+- Pairwise swaps sweep locality from ≈0 to its hill-climbed maximum, so only *which*
+  components share a host changes.
+- Locality is 1 − the cross-host share of topic bandwidth, frequency × size, routed through
+  the topic's broker.
+
+Spread end → local end, I_comp mean over used hosts, 3 seeds:
+
+| scenario, k | E[I_comp] | max I_comp | locality lower E in |
+|---|---|---|---|
+| atm, 8 | 0.278 → 0.241 | 0.404 → 0.381 | 2/3 |
+| atm, 4 | 0.404 → 0.357 | 0.530 → 0.553 | 3/3 |
+| av, 8 | 0.227 → 0.202 | 0.386 → 0.380 | 3/3 |
+| av, 4 | 0.419 → 0.367 | 0.535 → 0.505 | 3/3 |
+| autoware, 6 | 0.382 → 0.312 | 0.492 → 0.554 (ρ = +0.71) | 3/3 |
+| autoware, 3 | 0.521 → 0.437 | 0.680 → 0.674 | 3/3 |
+
+- **Expected impact.** The alignment survives the confound but shrinks to 10–18%, compared
+  with ~4× from using fewer hosts. I* points the same way where it is not saturated: on
+  autoware k=6 it goes 0.561 → 0.438, while on av it stays ≈0.92–0.96 throughout.
+- **Worst case.** A tail tension appears in only 2 of 6 cells: autoware k=6 (3/3 seeds) and
+  atm k=4 (2/3).
+- **Reading.** "Locality vs reliability is a fundamental trade-off" is not what the oracles
+  show. At a fixed host count, locality mostly *helps*.
+
+**7.6 Redundancy with a price.** Part D:
+- Hosts are in domains of 2.
+- Hot-standby replicas subscribe to their inputs (to stay warm) and receive state sync priced
+  at the component's published bandwidth.
+- Failure events are every single host and every domain.
+- Traffic is normalized by the replica-free total, so values can exceed 1.
+
+Averaged over the three scenarios, with locality-optimized primaries:
+- **Adding replicas at all (none → same_domain)** raises cross-host traffic by +0.29 to
+  +0.77. It buys host-outage protection: E[I_comp] over hosts falls 40–47%. It buys nothing
+  against domain outages.
+- **Anti-affinity (same_domain → cross_domain)** costs about the same cross-host traffic, but
+  cross-domain traffic rises by +0.11 to +0.39. It buys domain-outage protection:
+  - E[I_comp] over domains falls by 0.10–0.22;
+  - worst case falls by 0.09–0.12.
+  - This is a genuine Pareto trade-off, but it is the classic anti-affinity one that
+    CHASE (C1) and Kubernetes anti-affinity (K1) already encode.
+- **Budgeted anti-affinity (half the hot-standby set cross-domain).** Selection runs on I*
+  and is judged on I_comp as the held-out oracle. Domain-outage E[I_comp] by selection rule:
+
+| scenario | random | InDeg | I*-marginal |
+|---|---|---|---|
+| atm | 0.321 | 0.334 | 0.335 |
+| av | 0.301 | 0.285 | 0.296 |
+| autoware | 0.387 | 0.331 | 0.377 |
+
+  Cascade-aware selection is never the best rule. InDeg wins 2/3 and random wins on atm.
+  I* is too flat to select with: single-flip gains are exactly 0 for most components on
+  atm. This repeats the JSS pattern, where counts match cascade-aware rankers.
+
+**Implications for §3 (updated 2026-10-18).**
+- Claim 4 in its "trade-off" form is not supported. Locality and expected impact align at a
+  fixed host count, and the tail tension is scenario-specific.
+- The only robust trade-off is replica anti-affinity vs cross-domain traffic, which is known.
+- The contribution would have to come from *which* components to spread under a traffic or
+  capacity budget. On these probes the cascade model does not beat InDeg there. Before a
+  placement paper, test selection with a non-first-order oracle: either the v2 labeler items
+  in the 2026-10-08 simulation evaluation, or a mission-thread label.
+
+**Caveats.**
+- n = 3 seeds and 3 scenarios.
+- The traffic model is an assumption: warm replicas, sync priced at output bandwidth, the
+  first router only, libraries attributed to their user apps.
+- Failure domains are pairs of hosts.
+- I_comp keeps the legacy mesh rule.
+- Replica load is reported but not constrained: max load rises 1.5–2×.
