@@ -40,6 +40,7 @@ Column legend:
 | A1 | Aleti, Buhnova, Grunske, Koziolek & Meedeniya, **Software Architecture Optimization Methods: A Systematic Literature Review** | IEEE TSE 39, 2013 (DOI 10.1109/TSE.2012.64) | Survey (188 papers) | — | — | — | — | Taxonomy | — | — | ❌ (volume/pages need checking) |
 | A2 | Aleti, Björnander, Grunske & Meedeniya, **ArcheOpterix** | ICSE 2009 workshop (MOMPES vs. WoSQ: sources disagree) | Embedded, AADL models | AADL architecture | Deployment | Multiple quality attributes | n/v | Evolutionary, Pareto | Experiments from initial deployments | n/v | ❌ |
 | A3 | Koziolek, Koziolek & Reussner, **PerOpteryx** (tactics-guided) | QoSA-ISARCS 2011, pp. 33–42; earlier Martens et al., WOSP/SIPEW 2010 | Component-based (Palladio models) | Palladio Component Model | Allocation, server configuration, component selection | Performance, reliability, cost | Model-based reliability (PCM) | NSGA-II with architectural tactics | Business reporting system, ABB control system | ✅ ABB | ❌ |
+| A4 | Nazari, Thiruvady, Aleti & Moser, **A mixed integer linear programming model for reliability optimisation in the component deployment problem** | J. Oper. Res. Soc. 67(8):1050–1060, 2016 (DOI 10.1057/jors.2015.119) | Component deployment (same group as C4) | n/v | Component → hardware host | Reliability | n/v | **MILP** (linearizes the non-linear reliability function); benchmarked against earlier heuristics/metaheuristics | n/v | n/v | ❌ |
 
 ### 1.3 Automotive and embedded deployment
 
@@ -62,6 +63,10 @@ Column legend:
 | F5 | Cheng, Nguyen & Bhargava, **Resilient edge service placement under demand and node failure uncertainties** (arXiv 2107.04748) | arXiv | n/v | Robust cost | Node failures | Adaptive robust optimization | n/v | ❌ |
 | F6 | **IRENE** | CLOSER 2020 | n/v | Availability, interference | n/v | Genetic algorithm | n/v | ❌ |
 | F7 | Le Duc et al., survey of ML for reliable resource provisioning in edge-cloud | ACM CSUR, 2020 | — | — | — | Survey | — | ❌ |
+| F8 | Pongthawornkamol, Nahrstedt & Wang, **Reliability and timeliness analysis of fault-tolerant distributed publish/subscribe systems** | USENIX ICAC 2013 | Pub-sub (analytic model) | Reliability and timeliness; covers broker deployment and reliability optimization (per abstract) | Component failures + recovery | Analytic model | n/v | ❌ |
+| F9 | **Algorithms for optimal replica placement under correlated failure in hierarchical failure domains** (arXiv 1701.01539) | arXiv, 2017 | Hierarchical failure domains | Explicit objective for replica placement under correlated failure | Correlated (domain) failures | n/v | n/v | ❌ |
+| F10 | **Failure-resilient and carbon-efficient deployment of microservices over the cloud-edge continuum** (arXiv 2601.04123) | arXiv, 2026 | n/v | Resilience + carbon | Historical failure data → soft affinity / anti-affinity / avoid constraints | Constraint generation, then placement | n/v | ❌ |
+| F11 | Zhai, Chen, Wolinsky & Ford, **Heading off correlated failures through Independence-as-a-Service** (INDaaS) | OSDI 2014 | Fault graphs over network/hardware/software dependencies; "risk groups" | Audit the independence of redundant deployments (no placement search) | Hidden shared dependencies | Pluggable dependency acquisition + auditing | ✓ three case studies | ❌ |
 
 ### 1.5 Learned (GNN / RL) placement
 
@@ -304,6 +309,11 @@ has been seen at abstract level)
       SE-side backbone.
 - [ ] Check for **DDS- and ROS 2-specific** placement work beyond C2/C3 (for example, the
       transport-selection framework of De Marchi & Bombieri, 2024, and FogROS2-Config).
+- [ ] Read F8 (Pongthawornkamol et al., ICAC 2013). It is the only pub-sub-specific
+      reliability work with a deployment angle found so far (added 2026-10-18), so it is
+      the most direct threat to the "pub-sub/topic-level model" row of §2.
+- [ ] Read A4 (Nazari et al., JORS 2016). An exact MILP for reliability-driven component
+      deployment already exists, so "we formulate an exact MILP" cannot be a contribution.
 
 ---
 
@@ -322,3 +332,76 @@ has been seen at abstract level)
 **Boundary with AuSE:** AuSE verifies *individual edits* to an existing deployment after
 the fact. This paper *synthesizes a whole placement* under resource constraints. Both
 manuscripts must state this explicitly.
+
+---
+
+## 7. Probe evidence (2026-10-18)
+
+Two read-only probes test claim 4 and the ScatterD question from §3 against the existing
+oracles. Neither changes `saag/`, the corpus or any published label. Results are written to
+`results/`, which is gitignored.
+
+- [reproduce/placement_objective_probe.py](../../../reproduce/placement_objective_probe.py)
+  places one host per component. It then scores Node injection under I* and I_comp, with
+  uniform p over hosts, using 3 placement seeds.
+- [reproduce/placement_redundancy_probe.py](../../../reproduce/placement_redundancy_probe.py)
+  adds replicas and correlated failures. Hosts are grouped into domains of 2, and the probe
+  runs on the opt-in `replica_aware` flag.
+
+**7.1 Replica semantics decide the answer.** With the flag off (the published semantics),
+both oracles kill a replicated component when *any* one of its hosts fails. A real flag run
+matches an emulated all-hosts-down run exactly (max |Δ| = 0 on atm and av). The probe then
+places replicas cross-domain (anti-affinity) instead of in-domain and measures the change in
+I_comp, meaning cross_domain − same_domain, under domain outages:
+
+| scenario | flag off: mean / max | flag on: mean / max |
+|---|---|---|
+| atm | +0.160 / +0.095 (worse, 6/6) | −0.169 / −0.142 (better, 6/6) |
+| av | +0.097 / +0.063 (worse, 6/6) | −0.123 / −0.146 (better, 6/6) |
+
+Under the published semantics, anti-affinity is scored as harmful. Any placement result
+computed without the flag would recommend the opposite of standard practice.
+
+**7.2 I\* is a weak placement objective.**
+- On av, Node I* is ≈0.95 for every host and ≈0.96 for every domain, whatever the placement.
+  It cannot discriminate between placements.
+- Under domain outages, max I* never moves with replica policy.
+- I_comp with the legacy mesh rule scores empty hosts above zero.
+- Neither oracle is a clean placement score as it stands.
+
+**7.3 Locality vs expected impact (claim 4).**
+
+Consolidation trades expected impact for worst case:
+- Consolidating onto one host gives the lowest expected I* and the highest worst-case I* on
+  atm, av and realworld_autoware_ros2. On atm, E[I*] is 0.125 vs 0.532 for round-robin,
+  while max I* is 1.000 vs 0.775.
+- Spearman ρ(locality, E[I*]) is −0.86, −0.60 and −0.85, and ρ(locality, max I*) is +0.66,
+  +0.59 and +0.61.
+
+**Caveat.** Most of the expected-impact gain comes from *using fewer hosts*: empty hosts
+contribute 0 under uniform p. That is the textbook series-system effect, not a pub-sub
+finding. A claim needs a comparison at a fixed number of used hosts. The closest such
+comparison, colocate vs round_robin (both use every host), favours colocation:
+- under I_comp, on 3/3 scenarios (0.260 vs 0.271, 0.232 vs 0.243, 0.316 vs 0.359);
+- under I*, on 2/3 scenarios (on av colocation is worse, 0.953 vs 0.914).
+
+The effect is small.
+
+**7.4 Does redundancy create the tension?** Only weakly.
+- On atm under I* (flag on, domain outages), the ranking flips once replicas are
+  anti-affine. Without replicas, colocate beats round_robin on E[I*] (0.660 vs 0.680). With
+  cross-domain replicas, round_robin wins (0.609 vs 0.655) at a higher cross-domain traffic
+  share (0.76 vs 0.67).
+- I_comp shows no flip: colocate wins in both arms.
+- The probe's cost proxy counts primary-to-primary traffic only, so it gives replica
+  placement no cost at all. Anti-affinity therefore looks free. A real tension needs a cost
+  for replica synchronization traffic and replica capacity.
+- n = 3 seeds and 2 scenarios. Treat this as directional.
+
+**Implications for §3.**
+- Claim 4 survives only in its narrow form: *the risk measure, not the topology, decides
+  whether co-location helps.* It must be shown at a fixed number of used hosts, and with a
+  replica cost model.
+- Every placement experiment must run with `replica_aware=True`, and the paper must say so.
+- The oracle used to evaluate a placement must not be the one it was optimized on. I* is
+  disqualified on av-like topologies by saturation.

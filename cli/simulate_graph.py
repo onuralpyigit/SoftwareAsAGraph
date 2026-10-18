@@ -153,6 +153,7 @@ def _run_fault_inject(args: argparse.Namespace) -> None:
         propagation_threshold=args.propagation_threshold,
         qos_factor_mode=getattr(args, "qos_factor", "ladder"),
         network_gating=getattr(args, "network_gating", False),
+        replica_aware=getattr(args, "replica_aware", False),
     )
     result = injector.run(node_types=node_types, node_ids=node_ids)
     elapsed = time.perf_counter() - t0
@@ -617,6 +618,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_shared(fi)
     _add_network_gating(fi)
+    fi.add_argument(
+        "--replica-aware", action="store_true",
+        help="A Node outage kills a resident only when all of its hosts are down, "
+             "so a hot-standby replica survives.  Off by default (published labels).",
+    )
     fi.add_argument(
         "--nodes",
         default=None,

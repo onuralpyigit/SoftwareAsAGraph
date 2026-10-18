@@ -420,7 +420,7 @@ class SimulationGraph:
                         
         return paths
 
-    def count_active_connected_components(self):  # -> int
+    def count_active_connected_components(self, all_hosts: bool = False):  # -> int
         """
         Count weakly-connected components in the active subgraph.
 
@@ -429,17 +429,21 @@ class SimulationGraph:
         FailureSimulator to compute true graph fragmentation rather than
         simple component loss ratio.
 
+        Args:
+            all_hosts: Attach a multi-hosted component to every host it RUNS_ON
+                rather than only the last one it declares (replica-aware mode).
+
         Returns:
             Number of weakly-connected components among active components.
             Returns 0 if no active components exist.
         """
 
-        active_graph = self._build_active_undirected_graph()
+        active_graph = self._build_active_undirected_graph(all_hosts)
         if len(active_graph) == 0:
             return 0
         return nx.number_connected_components(active_graph)
 
-    def active_connected_components(self) -> List[Set[str]]:
+    def active_connected_components(self, all_hosts: bool = False) -> List[Set[str]]:
         """The active subgraph's connected components as sets of component ids.
 
         Same projection as :meth:`count_active_connected_components`, exposed so
@@ -447,13 +451,17 @@ class SimulationGraph:
         counting islands.
         """
 
-        active_graph = self._build_active_undirected_graph()
+        active_graph = self._build_active_undirected_graph(all_hosts)
         if len(active_graph) == 0:
             return []
         return [set(c) for c in nx.connected_components(active_graph)]
 
-    def _build_active_undirected_graph(self):
-        """Undirected projection over active Application/Broker/Node components."""
+    def _build_active_undirected_graph(self, all_hosts: bool = False):
+        """Undirected projection over active Application/Broker/Node components.
+
+        ``all_hosts`` looks past ``_hosted_on`` (last declared host only) so a
+        component whose last host failed stays attached to a surviving replica host.
+        """
 
         # Build undirected graph of active components
         active_graph = nx.Graph()
@@ -468,7 +476,11 @@ class SimulationGraph:
 
         # Add edges for active relationships
         # RUNS_ON: app/broker <-> node
-        for comp_id, node_id in self._hosted_on.items():
+        if all_hosts:
+            runs_on = [(c, h) for c, hosts in self._runs_on_all.items() for h in hosts]
+        else:
+            runs_on = self._hosted_on.items()
+        for comp_id, node_id in runs_on:
             if comp_id in active_graph and node_id in active_graph:
                 active_graph.add_edge(comp_id, node_id)
         

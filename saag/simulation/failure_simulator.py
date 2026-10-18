@@ -183,7 +183,8 @@ class FailureSimulator:
 
     def __init__(self, graph: SimulationGraph, telemetry_profile: Optional[RuntimeTelemetryProfile] = None,
                  propagation_threshold: float = 0.2, qos_weighting: bool = True,
-                 use_topic_criticality: bool = False, network_gating: bool = False):
+                 use_topic_criticality: bool = False, network_gating: bool = False,
+                 replica_aware: bool = False):
         """
         Initialize the failure simulator.
 
@@ -212,6 +213,12 @@ class FailureSimulator:
                 lose the excess in the reachability, throughput and flow-disruption
                 terms (relative to the healthy baseline). Off by default; a no-op on
                 topologies without CONNECTS_TO links.
+            replica_aware: A Node takes down a hosted component only as far as all of
+                that component's hosts are down (its impact is the least impacted
+                host's), so a hot-standby replica keeps it alive; fragmentation then
+                attaches a multi-hosted component to every host rather than one.
+                Off by default, which keeps the published labels: any one host
+                failure takes a multi-hosted component down.
         """
         self.graph = graph
         self.telemetry = telemetry_profile or RuntimeTelemetryProfile()
@@ -219,6 +226,7 @@ class FailureSimulator:
         self.qos_weighting = qos_weighting
         self.use_topic_criticality = use_topic_criticality
         self.network_gating = network_gating
+        self.replica_aware = replica_aware
         self.logger = logging.getLogger(__name__)
         if not network_gating and any(c.type == "NetworkDevice" for c in graph.components.values()):
             self.logger.warning(
@@ -304,7 +312,7 @@ class FailureSimulator:
         died; it rises only when the graph actually splits, and in proportion to
         how valuable the stranded side is.
         """
-        islands = self.graph.active_connected_components()
+        islands = self.graph.active_connected_components(all_hosts=self.replica_aware)
         if len(islands) <= 1:
             return 0.0
 
@@ -914,7 +922,8 @@ class FailureSimulator:
             c for c in self.graph.components.values()
             if c.type in _COUNTED_TYPES and c.state == ComponentState.ACTIVE
         ])
-        self._initial_connected_components = self.graph.count_active_connected_components()
+        self._initial_connected_components = self.graph.count_active_connected_components(
+            all_hosts=self.replica_aware)
         self._initial_total_weight = self._compute_total_topic_weight()
         # A topology can already be disconnected when healthy. Record that so the
         # fragmentation term reports stranding *caused by the failure* rather than
@@ -1006,10 +1015,14 @@ class FailureSimulator:
                 queue_blast.append((consumer, curr))
 
     def _cascade_physical(self, scenario, state, current_id, current_impact, depth) -> None:
-        """Rule 1: a Node takes down everything it hosts."""
+        """Rule 1: a Node takes down everything it hosts (replica-aware: unless a peer host survives)."""
         for comp_id in self.graph.get_hosted_components(current_id):
             if self._rng.random() < scenario.cascade_probability:
-                self._apply_impact(state, comp_id, current_impact,
+                impact = current_impact
+                if self.replica_aware:
+                    # min() over the hosts: a surviving replica keeps the component up.
+                    impact = min(state.impact.get(h, 0.0) for h in self.graph.get_all_hosts(comp_id))
+                self._apply_impact(state, comp_id, impact,
                                    f"hosted_on:{current_id}", depth + 1)
 
     def _cascade_library(self, scenario, state, current_id, current_impact, depth) -> None:
@@ -1242,7 +1255,7 @@ class FailureSimulator:
         safety-critical topic reads the same as stranding an idle logger — so
         under QoS weighting the stranded QoS mass is blended in.
         """
-        final_cc = self.graph.count_active_connected_components()
+        final_cc = self.graph.count_active_connected_components(all_hosts=self.replica_aware)
         initial_cc = self._initial_connected_components
 
         if self._initial_components > 1:

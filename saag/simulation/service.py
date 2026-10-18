@@ -47,7 +47,7 @@ class SimulationService:
     """
 
     def __init__(self, repository: IGraphRepository, qos_weighting: bool = True,
-                 network_gating: bool = False):
+                 network_gating: bool = False, replica_aware: bool = False):
         """
         Args:
             repository: Graph repository port.
@@ -57,10 +57,13 @@ class SimulationService:
             network_gating: Count a delivery only while the CONNECTS_TO network
                 still carries it (reachability, and congestion where links declare
                 capacity). See FailureSimulator.
+            replica_aware: A host outage takes a multi-hosted component down only
+                once all of its hosts are down. See FailureSimulator.
         """
         self.repository = repository
         self.qos_weighting = qos_weighting
         self.network_gating = network_gating
+        self.replica_aware = replica_aware
 
     # =========================================================================
     # Wiring helpers
@@ -81,6 +84,7 @@ class SimulationService:
             propagation_threshold=propagation_threshold,
             qos_weighting=self.qos_weighting,
             network_gating=self.network_gating,
+            replica_aware=self.replica_aware,
         )
 
     @staticmethod

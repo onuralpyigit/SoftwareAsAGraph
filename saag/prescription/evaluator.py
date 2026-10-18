@@ -45,10 +45,11 @@ class GraphEvaluator:
     """Evaluates a repository's resilience for one layer."""
 
     def __init__(self, layer: str = "system", gnn_checkpoint: Optional[str] = None,
-                 network_gating: bool = False):
+                 network_gating: bool = False, replica_aware: bool = False):
         self.layer = layer
         self.gnn_checkpoint = gnn_checkpoint
         self.network_gating = network_gating
+        self.replica_aware = replica_aware
 
     def impact(self, repo: IGraphRepository, *, threshold: float, seed: int) -> Dict[str, float]:
         """Per-component cascade impact I(v) at one (threshold, seed) point.
@@ -59,7 +60,7 @@ class GraphEvaluator:
         from saag.simulation.service import SimulationService
 
         sim_results = SimulationService(
-            repo, network_gating=self.network_gating,
+            repo, network_gating=self.network_gating, replica_aware=self.replica_aware,
         ).run_failure_simulation_exhaustive(
             layer=self.layer, propagation_threshold=threshold, seed=seed,
         )
@@ -86,7 +87,8 @@ class GraphEvaluator:
 
         analysis_service = AnalysisService(repo)
         prediction_service = PredictionService(gnn_checkpoint_dir=self.gnn_checkpoint)
-        simulation_service = SimulationService(repo, network_gating=self.network_gating)
+        simulation_service = SimulationService(
+            repo, network_gating=self.network_gating, replica_aware=self.replica_aware)
 
         analysis_result = analysis_service.analyze_layer(self.layer)
         analysis_result.quality = prediction_service.predict_quality(analysis_result.structural)
