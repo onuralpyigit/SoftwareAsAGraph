@@ -22,7 +22,14 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("torch_geometric")
 
-from cli.loso_evaluate import _select_val_bundle, _build_validation_hetero  # noqa: E402
+from unittest.mock import patch
+
+from cli.loso_evaluate import (  # noqa: E402
+    ScenarioBundle,
+    _build_validation_hetero,
+    _select_val_bundle,
+    discover_scenarios,
+)
 from saag.prediction.gnn_service import GNNService  # noqa: E402
 from saag.prediction.trainer import GNNTrainer  # noqa: E402
 
@@ -307,3 +314,35 @@ def test_gat_branch_accepts_the_inner_validation_graph(tmp_path, monkeypatch):
         auto_layers=False, inner_val="auto",
     )
     assert seen["has_val"] is True
+
+
+# =============================================================================
+# Scenario Discovery Contract (from test_discover_scenarios_min.py)
+# =============================================================================
+
+class TestDiscoverScenarios:
+    @staticmethod
+    def _fake_bundle(scenario_id: str) -> ScenarioBundle:
+        return ScenarioBundle(
+            scenario_id=scenario_id, graph=None, structural={}, rm={}, simulation={},
+            hetero_data=None, n_nodes=10, n_edges=10, n_labelled=5,
+        )
+
+    def test_default_requires_at_least_two_scenarios(self, tmp_path):
+        (tmp_path / "atm_system").mkdir()
+        with patch("cli.loso_evaluate.load_scenario_bundle", return_value=self._fake_bundle("atm_system")):
+            with pytest.raises(ValueError, match="Need >= 2"):
+                discover_scenarios(tmp_path, skip=[])
+
+    def test_min_scenarios_one_allows_single_scenario(self, tmp_path):
+        (tmp_path / "atm_system").mkdir()
+        with patch("cli.loso_evaluate.load_scenario_bundle", return_value=self._fake_bundle("atm_system")):
+            bundles = discover_scenarios(tmp_path, skip=[], min_scenarios=1)
+        assert len(bundles) == 1
+        assert bundles[0].scenario_id == "atm_system"
+
+    def test_min_scenarios_one_still_errors_on_zero_usable(self, tmp_path):
+        (tmp_path / "atm_system").mkdir()
+        with patch("cli.loso_evaluate.load_scenario_bundle", return_value=None):
+            with pytest.raises(ValueError, match="Need >= 1"):
+                discover_scenarios(tmp_path, skip=[], min_scenarios=1)

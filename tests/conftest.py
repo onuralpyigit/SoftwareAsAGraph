@@ -1,6 +1,23 @@
 import pytest
 from saag.core import GraphData, ComponentData, EdgeData
 
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--quick",
+        action="store_true",
+        default=False,
+        help="Skip slow tests (e.g. long message-flow simulations)",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--quick"):
+        skip_slow = pytest.mark.skip(reason="skipped due to --quick flag")
+        for item in items:
+            if "slow" in item.keywords:
+                item.add_marker(skip_slow)
+
 @pytest.fixture
 def linear_graph():
     """A simple A -> B -> C linear graph."""

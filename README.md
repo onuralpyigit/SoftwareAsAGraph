@@ -191,7 +191,10 @@ One container publishes the SMART dashboard on `:7000`, the FastAPI server on `:
 ### 5. Run the tests
 
 ```bash
+make test                    # standard developer test suite (<15s)
+make check                   # pre-merge gate: lint + fast tests
 pytest                       # full suite; needs no live Neo4j
+pytest --quick               # fast developer run skipping slow tests
 pytest -m "not integration"  # skip anything requiring a database
 ```
 

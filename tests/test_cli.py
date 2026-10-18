@@ -648,3 +648,33 @@ class TestBenchmarkCLI:
         MockCreateRepo.assert_called_with(
             uri="bolt://db:7687", user="admin", password="secret"
         )
+
+
+class TestCliCommonArguments:
+    """Tests for cli/common/arguments.py Neo4j credential env-var resolution."""
+
+    @staticmethod
+    def _parsed_user(monkeypatch, **env) -> str:
+        from cli.common.arguments import add_neo4j_arguments
+
+        for key in ("NEO4J_USERNAME", "NEO4J_USER"):
+            monkeypatch.delenv(key, raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+
+        parser = argparse.ArgumentParser()
+        add_neo4j_arguments(parser)
+        return parser.parse_args([]).user
+
+    def test_neo4j_username_env_var_is_honoured(self, monkeypatch):
+        assert self._parsed_user(monkeypatch, NEO4J_USERNAME="alice") == "alice"
+
+    def test_neo4j_user_env_var_still_works_as_fallback(self, monkeypatch):
+        assert self._parsed_user(monkeypatch, NEO4J_USER="bob") == "bob"
+
+    def test_neo4j_username_takes_precedence_over_neo4j_user(self, monkeypatch):
+        assert self._parsed_user(monkeypatch, NEO4J_USERNAME="alice", NEO4J_USER="bob") == "alice"
+
+    def test_neo4j_user_defaults_to_neo4j(self, monkeypatch):
+        assert self._parsed_user(monkeypatch) == "neo4j"
+

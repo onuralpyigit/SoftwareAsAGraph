@@ -23,6 +23,7 @@ from saag.analysis.structural_analyzer import StructuralAnalyzer, extract_layer_
 from saag.analysis.analyzer import QualityAnalyzer
 from saag.analysis.weight_calculator import QualityWeights
 from saag.core import AnalysisLayer
+from saag.core.utils import serialization
 
 
 # =============================================================================
@@ -209,7 +210,7 @@ class TestStructuralMetricsCodeQuality:
         """CQ-004b: A multi-node population with no code-quality data (all raw values
         0.0) is a zero-variance population, not a solitary node — it carries no ranking
         signal, so LOC/CC/LCOM normalise to 0.0 and CQP == 0.0. Contrast with the
-        genuine single-node case in test_code_quality_hardening.py, which keeps 1.0."""
+        genuine single-node case in TestCodeQualityHardening, which keeps 1.0."""
         gd = _simple_two_app_graph()  # no code-quality fields
         analyzer = StructuralAnalyzer()
         res = analyzer.analyze(gd)
@@ -409,3 +410,147 @@ class TestAHPWeightsCodeQuality:
         w = QualityWeights()
         m_sum = w.m_betweenness + w.m_w_out + w.m_code_quality_penalty + w.m_coupling_risk + w.m_clustering
         assert m_sum == pytest.approx(1.0, abs=0.001)
+
+
+# =============================================================================
+# Code Quality Hardening & Normalization Edge Cases
+# =============================================================================
+
+class TestCodeQualityHardening:
+    """Consolidated from test_code_quality_hardening.py."""
+
+    def test_serialization_flat_aliases(self):
+        """Verify that flatten_component correctly adds flat aliases for code metrics."""
+        comp = {
+            "id": "app1",
+            "name": "App 1",
+            "code_metrics": {
+                "size": {"total_loc": 1000},
+                "complexity": {"avg_wmc": 15.5},
+                "cohesion": {"avg_lcom": 25.0},
+                "coupling": {"avg_fanin": 5, "avg_fanout": 3},
+            },
+        }
+        flat = serialization.flatten_component(comp, "Application")
+        assert flat["loc"] == 1000
+        assert flat["cyclomatic_complexity"] == 15.5
+        assert flat["lcom"] == 25.0
+        assert flat["coupling_afferent"] == 5
+        assert flat["coupling_efferent"] == 3
+        assert flat["cm_total_loc"] == 1000
+        assert flat["cm_avg_lcom"] == 25.0
+
+    def test_single_node_normalization_hardening(self):
+        """Verify that a single-node population gets 1.0 instead of 0.0."""
+        m = StructuralMetrics(id="lib1", name="Lib 1", type="Library")
+        m.loc_norm = 5000.0
+        m.complexity_norm = 45.0
+        m.lcom_norm = 35.0
+        m.coupling_afferent = 2
+        m.coupling_efferent = 4
+        m.instability_code = 4 / (2 + 4)
+
+        components = {"lib1": m}
+        StructuralAnalyzer._compute_code_quality_metrics(components)
+
+        assert m.loc_norm == 1.0
+        assert m.complexity_norm == 1.0
+        assert m.lcom_norm == 1.0
+        expected_cqp = 0.10 * 1.0 + 0.35 * 1.0 + 0.30 * (4 / 6) + 0.25 * 1.0
+        assert m.code_quality_penalty == pytest.approx(expected_cqp)
+
+    def test_multi_node_zero_variance_population_gets_zero_not_max(self):
+        """Verify multi-node zero-variance population normalises to 0.0."""
+        m1 = StructuralMetrics(id="lib1", name="Lib 1", type="Library")
+        m2 = StructuralMetrics(id="lib2", name="Lib 2", type="Library")
+        m3 = StructuralMetrics(id="lib3", name="Lib 3", type="Library")
+
+        components = {"lib1": m1, "lib2": m2, "lib3": m3}
+        StructuralAnalyzer._compute_code_quality_metrics(components)
+
+        for m in (m1, m2, m3):
+            assert m.loc_norm == 0.0
+            assert m.complexity_norm == 0.0
+            assert m.lcom_norm == 0.0
+            assert m.code_quality_penalty == pytest.approx(0.0)
+
+    def test_multi_node_identical_present_values_gets_zero_not_max(self):
+        """Two nodes with identical code-quality values also form a zero-variance population."""
+        m1 = StructuralMetrics(id="app1", name="App 1", type="Application")
+        m1.loc_norm = 500.0
+        m1.complexity_norm = 12.0
+        m1.lcom_norm = 0.4
+        m1.instability_code = 0.5
+
+        m2 = StructuralMetrics(id="app2", name="App 2", type="Application")
+        m2.loc_norm = 500.0
+        m2.complexity_norm = 12.0
+        m2.lcom_norm = 0.4
+        m2.instability_code = 0.5
+
+        components = {"app1": m1, "app2": m2}
+        StructuralAnalyzer._compute_code_quality_metrics(components)
+
+        for m in (m1, m2):
+            assert m.loc_norm == 0.0
+            assert m.complexity_norm == 0.0
+            assert m.lcom_norm == 0.0
+            assert m.code_quality_penalty == pytest.approx(0.30 * 0.5)
+
+    def test_cqp_formula_weights_v7(self):
+        """Verify CQP v7 weights with multiple nodes."""
+        m1 = StructuralMetrics(id="app1", name="App 1", type="Application")
+        m1.loc_norm = 100.0
+        m1.complexity_norm = 10.0
+        m1.lcom_norm = 5.0
+        m1.instability_code = 0.5
+
+        m2 = StructuralMetrics(id="app2", name="App 2", type="Application")
+        m2.loc_norm = 200.0
+        m2.complexity_norm = 20.0
+        m2.lcom_norm = 10.0
+        m2.instability_code = 0.5
+
+        components = {"app1": m1, "app2": m2}
+        StructuralAnalyzer._compute_code_quality_metrics(components)
+
+        assert m2.loc_norm == 1.0
+        assert m2.complexity_norm == 1.0
+        assert m2.lcom_norm == 1.0
+
+        assert m1.loc_norm == 0.0
+        assert m1.complexity_norm == 0.0
+        assert m1.lcom_norm == 0.0
+
+        assert m2.code_quality_penalty == pytest.approx(0.85)
+        assert m1.code_quality_penalty == pytest.approx(0.15)
+
+    def test_topic_serialization_deadline_and_history(self):
+        """Verify Topic flattening and reconstruction preserves deadline_ms and history_depth."""
+        comp = {
+            "id": "T1",
+            "name": "sensor.imu",
+            "size": 512,
+            "qos": {
+                "reliability": "RELIABLE",
+                "durability": "TRANSIENT_LOCAL",
+                "transport_priority": "HIGH",
+                "deadline_ms": 20.0,
+                "history_depth": 50,
+            },
+            "frequency": 50.0,
+            "criticality": "HIGH",
+            "deadline_ms": 20.0,
+            "history_depth": 50,
+        }
+        flat = serialization.flatten_component(comp, "Topic")
+        assert flat["qos_deadline_ms"] == 20.0
+        assert flat["qos_history_depth"] == 50
+        assert "deadline_ms" not in flat
+        assert "history_depth" not in flat
+
+        reconstructed = serialization._reconstruct_topic(flat)
+        assert reconstructed["deadline_ms"] == 20.0
+        assert reconstructed["history_depth"] == 50
+        assert reconstructed["qos"]["deadline_ms"] == 20.0
+        assert reconstructed["qos"]["history_depth"] == 50

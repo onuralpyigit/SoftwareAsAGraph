@@ -12,6 +12,9 @@ Covers:
   - ChangePropagationSimulator: basic BFS correctness and stop conditions
 """
 import pytest
+from saag.core import GraphData, ComponentData, EdgeData, AnalysisLayer
+from saag.core.metrics import StructuralMetrics
+from saag.analysis.models import StructuralAnalysisResult, GraphSummary
 from saag.analysis.weight_calculator import QualityWeights, AHPMatrices, AHPProcessor
 from saag.analysis.analyzer import QualityAnalyzer
 from saag.analysis.structural_analyzer import StructuralAnalyzer
@@ -473,3 +476,110 @@ class TestMaintainabilityOracleIsLive:
                 continue
             distinct = {round(r.impact.maintainability_impact, 9) for r in results}
             assert len(distinct) >= 2, f"IM(v) is constant on layer '{layer}'"
+
+
+# ===========================================================================
+# CouplingRisk Hardening & Path Complexity
+# ===========================================================================
+
+class TestCouplingRiskHardening:
+    """Consolidated from test_coupling_risk_hardening.py."""
+
+    def test_coupling_risk_capping(self):
+        """Verify that CouplingRisk is correctly modulated and capped at 1.0."""
+        m = StructuralMetrics(id="app1", name="App 1", type="Application")
+        m.in_degree_raw = 5
+        m.out_degree_raw = 5
+        m.path_complexity = 2.0
+
+        sar = StructuralAnalysisResult(
+            layer=AnalysisLayer.SYSTEM,
+            components={"app1": m},
+            edges={},
+            graph_summary=GraphSummary(layer="system", nodes=1, edges=10),
+        )
+
+        analyzer = QualityAnalyzer()
+        results = analyzer.analyze(sar)
+        score = next(c for c in results.components if c.id == "app1")
+        assert score.scores.maintainability == pytest.approx(0.20)
+
+    def test_coupling_risk_modulation(self):
+        """Verify that path_complexity increases CouplingRisk."""
+        m3 = StructuralMetrics(id="app3", name="App 3", type="Application")
+        m3.in_degree_raw = 8
+        m3.out_degree_raw = 2
+        m3.path_complexity = 1.0
+
+        sar = StructuralAnalysisResult(
+            layer=AnalysisLayer.SYSTEM,
+            components={"app3": m3},
+            edges={},
+            graph_summary=GraphSummary(layer="system", nodes=1, edges=10),
+        )
+
+        analyzer = QualityAnalyzer()
+        results = analyzer.analyze(sar)
+        score = next(c for c in results.components if c.id == "app3")
+        assert score.scores.maintainability == pytest.approx(0.1328)
+
+
+class TestPathComplexity:
+    """Consolidated from test_path_count.py."""
+
+    @pytest.fixture
+    def multi_path_graph(self):
+        return GraphData(
+            components=[
+                ComponentData(id="A", component_type="Application"),
+                ComponentData(id="B", component_type="Application"),
+                ComponentData(id="C", component_type="Application"),
+            ],
+            edges=[
+                EdgeData("A", "B", "Application", "Application", "app_to_app", "DEPENDS_ON", 1.0, path_count=1),
+                EdgeData("A", "C", "Application", "Application", "app_to_app", "DEPENDS_ON", 1.0, path_count=3),
+            ],
+        )
+
+    def test_path_complexity_calculation(self, multi_path_graph):
+        """StructuralAnalyzer should correctly compute mean log-scaled path count."""
+        analyzer = StructuralAnalyzer()
+        res = analyzer.analyze(multi_path_graph)
+        assert res.components["A"].path_complexity == pytest.approx(1.5)
+        assert res.components["B"].path_complexity == 0.0
+        assert res.components["C"].path_complexity == 0.0
+
+    def test_coupling_risk_modulation_with_id(self):
+        """Verifies modulation when base CouplingRisk > 0."""
+        graph = GraphData(
+            components=[
+                ComponentData(id="X", component_type="Application"),
+                ComponentData(id="Y", component_type="Application"),
+                ComponentData(id="Z", component_type="Application"),
+            ],
+            edges=[
+                EdgeData("Z", "X", "Application", "Application", "app_to_app", "DEPENDS_ON", 1.0, path_count=7),
+                EdgeData("X", "Y", "Application", "Application", "app_to_app", "DEPENDS_ON", 1.0, path_count=3),
+            ],
+        )
+
+        struct_res = StructuralAnalyzer().analyze(graph)
+        quality_res = QualityAnalyzer().analyze(struct_res)
+        x_quality = next(c for c in quality_res.components if c.id == "X")
+
+        graph_base = GraphData(
+            components=[
+                ComponentData(id="X", component_type="Application"),
+                ComponentData(id="Y", component_type="Application"),
+                ComponentData(id="Z", component_type="Application"),
+            ],
+            edges=[
+                EdgeData("Z", "X", "Application", "Application", "app_to_app", "DEPENDS_ON", 1.0, path_count=1),
+                EdgeData("X", "Y", "Application", "Application", "app_to_app", "DEPENDS_ON", 1.0, path_count=1),
+            ],
+        )
+        struct_base = StructuralAnalyzer().analyze(graph_base)
+        quality_base = QualityAnalyzer().analyze(struct_base)
+        m_base = next(c for c in quality_base.components if c.id == "X").scores.maintainability
+
+        assert x_quality.scores.maintainability >= m_base

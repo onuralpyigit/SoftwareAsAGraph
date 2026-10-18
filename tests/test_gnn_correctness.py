@@ -4,6 +4,8 @@ import torch
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from saag.prediction.gnn_service import GNNService, GNNAnalysisResult
+from saag.prediction.data_preparation import GraphConversionResult
+from saag.prediction.trainer import EvalMetrics
 from torch_geometric.data import HeteroData
 
 @pytest.fixture
@@ -160,3 +162,63 @@ def test_node_model_is_edge_models_inner_gnn():
     node_only._init_models(metadata)
     assert node_only._edge_model is None
     assert node_only._node_model is not None
+
+
+# =============================================================================
+# GNN Evaluation & Seed Consistency (from test_gnn_evaluation.py)
+# =============================================================================
+
+@pytest.fixture
+def mock_gnn_service():
+    """Service with mocked models and internal metadata."""
+    service = GNNService(checkpoint_dir="test_ckpt")
+    service._node_model = MagicMock()
+    service._node_model.predict_edges = False
+    service._node_model.to.return_value = service._node_model
+    service._node_model.eval.return_value = None
+
+    conv = MagicMock(spec=GraphConversionResult)
+    conv.node_id_map = {"Application": ["app1", "app2"]}
+    conv.edge_name_map = {}
+    service._conversion_result = conv
+
+    return service
+
+
+def test_mask_consistency_best_seed(mock_gnn_service):
+    """G9: Verify that the best seed is persisted and used for splitting."""
+    service = mock_gnn_service
+    service._best_seed = 1234
+
+    data = HeteroData()
+    data["Application"].x = torch.randn(2, 23)
+    data["Application"].y = torch.tensor([[0.5] * 5, [0.8] * 5])
+
+    mock_metrics = EvalMetrics(0.9, 0.8, 0.1, 0.1, 1.0, 1.0, 1.0)
+
+    with patch("saag.prediction.gnn_service.create_node_splits") as mock_split:
+        with patch("saag.prediction.gnn_service.evaluate", return_value=mock_metrics):
+            service._node_model.return_value = {"Application": torch.randn(2, 5)}
+            service.predict_from_data(data, eval_labels={"app1": {}})
+
+            mock_split.assert_called_once()
+            assert mock_split.call_args.kwargs["seed"] == 1234
+
+
+def test_ablation_modes(mock_gnn_service):
+    """Verify that mode selection picks the correct score source."""
+    service = mock_gnn_service
+
+    data = HeteroData()
+    data["Application"].x = torch.randn(2, 23)
+    data["Application"].y_rm = torch.tensor([[0.1] * 5, [0.2] * 5])
+
+    service._node_model.return_value = {"Application": torch.tensor([[0.8] * 5, [0.9] * 5])}
+
+    result_rm = service.predict_from_data(data, mode="rm")
+    assert result_rm.node_scores["app1"].source == "RM"
+    assert result_rm.node_scores["app1"].composite_score == pytest.approx(0.1)
+
+    result_gnn = service.predict_from_data(data, mode="gnn")
+    assert result_gnn.node_scores["app1"].source == "GNN"
+    assert result_gnn.node_scores["app1"].composite_score == pytest.approx(0.8)

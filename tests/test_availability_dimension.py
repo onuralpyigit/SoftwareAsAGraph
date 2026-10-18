@@ -12,13 +12,14 @@ Covers:
   - calculate_spof_f1: perfect, zero, partial coverage
 """
 import pytest
+from saag.core import GraphData, ComponentData, EdgeData, AnalysisLayer
+from saag.core.metrics import StructuralMetrics
+from saag.analysis.models import StructuralAnalysisResult
 from saag.analysis.weight_calculator import QualityWeights, AHPMatrices, AHPProcessor
 from saag.analysis.analyzer import QualityAnalyzer
 from saag.analysis.structural_analyzer import StructuralAnalyzer
 from saag.simulation.models import ImpactMetrics
-from saag.validation.metric_calculator import (
-    calculate_spof_f1,
-)
+from saag.validation.metric_calculator import calculate_spof_f1
 
 
 # ===========================================================================
@@ -360,3 +361,87 @@ class TestSPOFThresholdIsAQuantile:
         assert res["precision"] == pytest.approx(0.25, abs=0.02), (
             "the top-quartile cut should select ~25% of the population, not ~50%"
         )
+
+
+# ===========================================================================
+# Availability Decoupling & Orthogonality
+# ===========================================================================
+
+class TestAvailabilityDecoupling:
+    """Verifies decoupling of structural SPOF from QoS weight."""
+
+    @pytest.fixture
+    def spof_graph(self):
+        """Graph where X is a structural SPOF (articulation point): Y -> X -> Z."""
+        return GraphData(
+            components=[
+                ComponentData(id="X", component_type="Application"),
+                ComponentData(id="Y", component_type="Application"),
+                ComponentData(id="Z", component_type="Application"),
+            ],
+            edges=[
+                EdgeData("Y", "X", "Application", "Application", "app_to_app", "DEPENDS_ON", 1.0),
+                EdgeData("X", "Z", "Application", "Application", "app_to_app", "DEPENDS_ON", 1.0),
+            ],
+        )
+
+    def test_structural_spof_not_masked_by_low_qos(self, spof_graph):
+        """Structural SPOFs should retain baseline availability risk even if QoS weight is minimal."""
+        for c in spof_graph.components:
+            if c.id == "X":
+                c.weight = 1.0
+
+        struct_res_high = StructuralAnalyzer().analyze(spof_graph)
+        quality_res_high = QualityAnalyzer().analyze(struct_res_high)
+        a_high = {c.id: c.scores.availability for c in quality_res_high.components}["X"]
+
+        for c in spof_graph.components:
+            if c.id == "X":
+                c.weight = 0.01
+
+        struct_res_low = StructuralAnalyzer().analyze(spof_graph)
+        quality_res_low = QualityAnalyzer().analyze(struct_res_low)
+        a_low = {c.id: c.scores.availability for c in quality_res_low.components}["X"]
+
+        ap_c_dir = struct_res_low.components["X"].ap_c_directed
+        assert ap_c_dir >= 0.5
+        expected_baseline = 0.35 * ap_c_dir
+        assert a_low >= expected_baseline
+        assert a_low < a_high
+
+
+class TestAvailabilityOrthogonality:
+    """Verifies that A(v) is driven by structural SPOF risk, not by PageRank alone."""
+
+    def test_availability_orthogonality(self):
+        comp_a = StructuralMetrics(
+            id="A", name="AppA", type="app", pagerank=0.1, weight=0.5, is_articulation_point=True
+        )
+        comp_b = StructuralMetrics(
+            id="B", name="AppB", type="app", pagerank=1.0, weight=0.1, is_articulation_point=False
+        )
+
+        result = StructuralAnalysisResult(
+            layer=AnalysisLayer.APP,
+            components={"A": comp_a, "B": comp_b},
+            edges={},
+            graph_summary=None,
+        )
+
+        weights = QualityWeights(
+            a_qspof=1.0,
+            a_bridge_ratio=0.0,
+            a_ap_c_directed=0.0,
+            a_cdi=0.0,
+            a_qos_weight=0.0,
+            ft_reverse_pagerank=1.0,
+            ft_pagerank=0.0,
+            ft_in_degree=0.0,
+        )
+        analyzer = QualityAnalyzer(weights=weights, use_ahp=False, normalization_method="max")
+        quality_result = analyzer.analyze(result)
+
+        qa = next(c for c in quality_result.components if c.id == "A")
+        qb = next(c for c in quality_result.components if c.id == "B")
+
+        assert qa.scores.availability >= qb.scores.availability

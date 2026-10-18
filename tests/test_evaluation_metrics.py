@@ -18,6 +18,14 @@ pytest.importorskip("torch")
 pytest.importorskip("sklearn")
 
 from cli.loso_evaluate import compute_inductive_metrics  # noqa: E402
+from saag.evaluation.metrics import (  # noqa: E402
+    UNDEFINED,
+    aggregate_per_type,
+    component_qos_exposure,
+    critical_topic_coverage_at_k,
+    per_qos_tier_rho,
+    resolve_eval_keys,
+)
 
 
 def _graph(node_ids, node_type="Application") -> nx.DiGraph:
@@ -251,3 +259,205 @@ def test_absolute_tau_above_every_label_is_undefined_not_zero():
     assert m["n_true_critical"] == 0
     assert np.isnan(m["pr_auc"])
     assert np.isnan(m["precision_at_tau"])
+
+
+# =============================================================================
+# Evaluation Population Contract (from test_eval_population.py)
+# =============================================================================
+
+class TestEvaluationPopulationContract:
+    @staticmethod
+    def _pop_graph():
+        g = nx.DiGraph()
+        for i in range(6):
+            g.add_node(f"A{i}", type="Application")
+        for i in range(3):
+            g.add_node(f"L{i}", type="Library")
+        for i in range(4):
+            g.add_node(f"T{i}", type="Topic")
+        return g
+
+    @staticmethod
+    def _pop_labels():
+        labels = {f"A{i}": 0.1 * (i + 1) for i in range(6)}
+        labels.update({f"L{i}": 0.2 * (i + 1) for i in range(3)})
+        labels.update({f"T{i}": 0.0 for i in range(4)})
+        return labels
+
+    def test_key_set_is_independent_of_predictions(self):
+        g, labels = self._pop_graph(), self._pop_labels()
+        good = {n: float(i) for i, n in enumerate(labels)}
+        bad = {n: 1.0 for n in labels}
+        keys_good = resolve_eval_keys(good, labels, g, population="application")
+        keys_bad = resolve_eval_keys(bad, labels, g, population="application")
+        assert keys_good == keys_bad
+        assert keys_good == sorted(f"A{i}" for i in range(6))
+
+    def test_population_selects_declared_types_only(self):
+        g, labels = self._pop_graph(), self._pop_labels()
+        preds = dict.fromkeys(labels, 1.0)
+        assert len(resolve_eval_keys(preds, labels, g, "application")) == 6
+        assert len(resolve_eval_keys(preds, labels, g, "app_lib")) == 9
+        assert len(resolve_eval_keys(preds, labels, g, "labeled")) == 13
+
+    def test_zero_labels_are_kept_but_unlabelled_ids_are_dropped(self):
+        g, labels = self._pop_graph(), self._pop_labels()
+        preds = dict.fromkeys(labels, 1.0)
+        kept = resolve_eval_keys(preds, labels, g, "labeled")
+        assert "T0" in kept
+        dropped = resolve_eval_keys(
+            preds, labels, g, "labeled", unlabeled_ids=[f"T{i}" for i in range(4)]
+        )
+        assert not any(k.startswith("T") for k in dropped)
+        assert len(dropped) == 9
+
+    def test_constant_stratum_reports_undefined_not_zero(self):
+        g, labels = self._pop_graph(), self._pop_labels()
+        preds = {n: float(i) for i, n in enumerate(labels)}
+        m = compute_inductive_metrics(preds, labels, g, population="labeled")
+        per_type = m["per_type_rho"]
+        assert per_type["Topic"]["rho"] == UNDEFINED
+        assert per_type["Topic"]["reason"] == "constant_signal"
+        assert isinstance(per_type["Application"]["rho"], float)
+
+    def test_undefined_survives_aggregation(self):
+        runs = [
+            {"Application": {"rho": 0.8, "n": 6}, "Topic": {"rho": UNDEFINED, "n": 4}},
+            {"Application": {"rho": 0.6, "n": 6}, "Topic": {"rho": UNDEFINED, "n": 4}},
+        ]
+        agg = aggregate_per_type(runs, value_key="rho")
+        assert agg["Topic"]["mean"] == UNDEFINED
+        assert agg["Topic"]["n_seeds_undefined"] == 2
+        assert agg["Application"]["mean"] == pytest.approx(0.7)
+        assert agg["Application"]["n_seeds"] == 2
+
+    def test_partially_undefined_stratum_averages_only_defined_runs(self):
+        runs = [
+            {"Library": {"rho": 0.4, "n": 3}},
+            {"Library": {"rho": UNDEFINED, "n": 3}},
+            {"Library": {"rho": 0.6, "n": 3}},
+        ]
+        agg = aggregate_per_type(runs, value_key="rho")
+        assert agg["Library"]["mean"] == pytest.approx(0.5)
+        assert agg["Library"]["n_seeds"] == 2
+        assert agg["Library"]["n_seeds_undefined"] == 1
+
+    def test_coverage_is_always_reported(self):
+        g, labels = self._pop_graph(), self._pop_labels()
+        preds = {f"A{i}": float(i) for i in range(6)}
+        m = compute_inductive_metrics(preds, labels, g, population="labeled")
+        assert m["n_predicted"] == 6
+        assert m["n_labeled"] == 13
+        assert m["n_evaluated"] == 6
+        assert m["eval_population"] == "labeled"
+
+    def test_pinned_keys_override_population(self):
+        g, labels = self._pop_graph(), self._pop_labels()
+        preds = {n: float(i) for i, n in enumerate(labels)}
+        pinned = ["A0", "A1", "A2", "L0"]
+        m = compute_inductive_metrics(preds, labels, g, eval_keys=pinned)
+        assert m["n_evaluated"] == 4
+
+    def test_unknown_population_is_rejected(self):
+        g, labels = self._pop_graph(), self._pop_labels()
+        with pytest.raises(ValueError, match="unknown eval population"):
+            resolve_eval_keys(labels, labels, g, population="everything")
+
+
+# =============================================================================
+# QoS Evaluation Metrics (from test_qos_evaluation_metrics.py)
+# =============================================================================
+
+class TestQoSEvaluationMetrics:
+    CRITICAL = {"reliability": "RELIABLE", "durability": "PERSISTENT", "transport_priority": "CRITICAL"}
+    TRIVIAL = {"reliability": "BEST_EFFORT", "durability": "VOLATILE", "transport_priority": "LOW"}
+
+    @classmethod
+    def _qos_graph(cls, n_trivial: int = 6) -> nx.DiGraph:
+        g = nx.DiGraph()
+        g.add_node("TopicCritical", type="Topic", qos=dict(cls.CRITICAL), size=256)
+        g.add_node("AppCritical", type="Application")
+        g.add_edge("AppCritical", "TopicCritical", type="PUBLISHES_TO")
+        for i in range(n_trivial):
+            g.add_node(f"TopicTrivial{i}", type="Topic", qos=dict(cls.TRIVIAL), size=256)
+            g.add_node(f"AppTrivial{i}", type="Application")
+            g.add_edge(f"AppTrivial{i}", f"TopicTrivial{i}", type="PUBLISHES_TO")
+        return g
+
+    def test_exposure_counts_published_mass_not_subscriptions(self):
+        g = self._qos_graph(n_trivial=1)
+        g.add_node("AppSub", type="Application")
+        g.add_edge("AppSub", "TopicCritical", type="SUBSCRIBES_TO")
+        exposure = component_qos_exposure(g)
+        assert exposure["AppCritical"] > 0.0
+        assert "AppSub" not in exposure
+
+    def test_exposure_ranks_critical_above_trivial(self):
+        exposure = component_qos_exposure(self._qos_graph())
+        assert exposure["AppCritical"] > exposure["AppTrivial0"]
+
+    def test_coverage_rewards_ranking_the_critical_carrier_first(self):
+        g = self._qos_graph()
+        keys = ["AppCritical"] + [f"AppTrivial{i}" for i in range(6)]
+        good = {"AppCritical": 1.0, **{f"AppTrivial{i}": 0.1 for i in range(6)}}
+        bad = {"AppCritical": 0.0, **{f"AppTrivial{i}": 1.0 for i in range(6)}}
+        good_cov = critical_topic_coverage_at_k(keys, good, g, k=1)
+        bad_cov = critical_topic_coverage_at_k(keys, bad, g, k=1)
+        assert good_cov["coverage"] > bad_cov["coverage"]
+        assert good_cov["lift"] > 1.0
+        assert bad_cov["lift"] < 1.0
+
+    def test_coverage_is_undefined_without_qos_exposure(self):
+        g = nx.DiGraph()
+        g.add_node("A", type="Application")
+        g.add_node("B", type="Application")
+        g.add_edge("A", "B", type="DEPENDS_ON")
+        result = critical_topic_coverage_at_k(["A", "B"], {"A": 1.0, "B": 0.0}, g, k=1)
+        assert result["coverage"] == UNDEFINED
+        assert result["reason"] == "no_qos_exposure"
+
+    def test_coverage_of_everything_is_total(self):
+        g = self._qos_graph()
+        keys = ["AppCritical"] + [f"AppTrivial{i}" for i in range(6)]
+        scores = {k: 1.0 for k in keys}
+        result = critical_topic_coverage_at_k(keys, scores, g, k=len(keys))
+        assert result["coverage"] == pytest.approx(1.0)
+
+    def test_tier_strata_separate_critical_from_trivial_carriers(self):
+        g = self._qos_graph()
+        keys = ["AppCritical"] + [f"AppTrivial{i}" for i in range(6)]
+        pred = {k: float(i) for i, k in enumerate(keys)}
+        truth = {k: float(i) for i, k in enumerate(keys)}
+        tiers = per_qos_tier_rho(keys, pred, truth, g)
+        assert len(tiers) >= 2
+        assert sum(t["n"] for t in tiers.values()) == len(keys)
+
+    def test_small_tier_is_undefined_not_zero(self):
+        g = self._qos_graph()
+        keys = ["AppCritical"] + [f"AppTrivial{i}" for i in range(6)]
+        pred = {k: float(i) for i, k in enumerate(keys)}
+        truth = {k: float(i) for i, k in enumerate(keys)}
+        tiers = per_qos_tier_rho(keys, pred, truth, g)
+        critical_tier = [t for t in tiers.values() if t["n"] < 3]
+        for tier in critical_tier:
+            assert tier["rho"] == UNDEFINED
+            assert tier["reason"] == "too_few_nodes"
+
+    def test_components_carrying_no_topic_are_omitted_not_bucketed(self):
+        g = self._qos_graph(n_trivial=3)
+        g.add_node("Orphan", type="Application")
+        keys = ["AppCritical", "Orphan"] + [f"AppTrivial{i}" for i in range(3)]
+        pred = {k: 1.0 for k in keys}
+        truth = {k: 1.0 for k in keys}
+        tiers = per_qos_tier_rho(keys, pred, truth, g)
+        assert sum(t["n"] for t in tiers.values()) == len(keys) - 1
+
+    def test_inductive_metrics_report_the_qos_axis(self):
+        g = self._qos_graph()
+        keys = ["AppCritical"] + [f"AppTrivial{i}" for i in range(6)]
+        pred = {k: float(i) for i, k in enumerate(keys)}
+        truth = {k: float(i) for i, k in enumerate(keys)}
+        metrics = compute_inductive_metrics(pred, truth, g, population="labeled")
+        assert "per_qos_tier_rho" in metrics
+        assert "critical_topic_coverage_at_k" in metrics
+        assert metrics["critical_topic_coverage_at_k"]["k"] == metrics["k"]

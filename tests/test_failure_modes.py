@@ -185,7 +185,120 @@ def test_simulate_exhaustive_monte_carlo_matches_trial_mean():
     )
 
 
-if __name__ == "__main__":
-    test_degraded_single_publisher()
-    test_degraded_crushed_multi_publisher()
-    test_degraded_starvation_boundary()
+# =============================================================================
+# Partition Mode & Pairwise / Multi-Target Failures
+# =============================================================================
+
+def test_partition_mode_skips_physical_cascade():
+    """Test PARTITION mode skips Rule 1 (Physical Cascade). Consolidated from test_partition_mode.py."""
+    components = [
+        ComponentData("Node1", "Node"),
+        ComponentData("App1", "Application"),
+        ComponentData("Topic1", "Topic"),
+        ComponentData("Broker1", "Broker"),
+    ]
+    edges = [
+        EdgeData("App1", "Node1", "Application", "Node", "infra", "RUNS_ON"),
+        EdgeData("App1", "Topic1", "Application", "Topic", "logic", "PUBLISHES_TO"),
+        EdgeData("Broker1", "Topic1", "Broker", "Topic", "logic", "ROUTES"),
+    ]
+
+    graph = SimulationGraph(GraphData(components=components, edges=edges))
+
+    # CASE 1: CRASH mode
+    sim_crash = FailureSimulator(graph)
+    res_crash = sim_crash.simulate(FailureScenario(target_ids=["Node1"], failure_mode=FailureMode.CRASH))
+    assert "App1" in res_crash.cascaded_failures
+
+    # CASE 2: PARTITION mode
+    graph.reset()
+    sim_part = FailureSimulator(graph)
+    scenario_part = FailureScenario(target_ids=["Node1"], failure_mode=FailureMode.PARTITION)
+    res_part = sim_part.simulate(scenario_part)
+
+    # App1 should NOT be failed in PARTITION mode because Rule 1 is skipped
+    assert "App1" not in res_part.cascaded_failures
+    assert len(res_part.cascaded_failures) == 0
+
+
+def test_pairwise_logic():
+    """Verify multiple initial targets and pairwise impact. Consolidated from test_pairwise_failure.py."""
+    components = [
+        ComponentData(id="Node1", component_type="Node"),
+        ComponentData(id="Node2", component_type="Node"),
+        ComponentData(id="App1", component_type="Application"),
+        ComponentData(id="App2", component_type="Application"),
+        ComponentData(id="Broker1", component_type="Broker"),
+        ComponentData(id="T1", component_type="Topic"),
+    ]
+    edges = [
+        EdgeData("App1", "Node1", "Application", "Node", "structural", "RUNS_ON"),
+        EdgeData("App2", "Node2", "Application", "Node", "structural", "RUNS_ON"),
+        EdgeData("App1", "T1", "Application", "Topic", "logic", "PUBLISHES_TO"),
+        EdgeData("App2", "T1", "Application", "Topic", "logic", "SUBSCRIBES_TO"),
+        EdgeData("Broker1", "T1", "Broker", "Topic", "logic", "ROUTES"),
+    ]
+
+    graph = SimulationGraph(GraphData(components=components, edges=edges))
+    sim = FailureSimulator(graph)
+
+    res1 = sim.simulate(FailureScenario(target_ids=["Node1"]))
+    assert "App1" in res1.cascaded_failures
+    assert "T1" in res1.cascaded_failures
+    impact1 = res1.impact.composite_impact
+
+    res2 = sim.simulate(FailureScenario(target_ids=["Node2"]))
+    assert "App2" in res2.cascaded_failures
+    impact2 = res2.impact.composite_impact
+
+    res_pair = sim.simulate(FailureScenario(target_ids=["Node1", "Node2"]))
+    assert "App1" in res_pair.cascaded_failures
+    assert "App2" in res_pair.cascaded_failures
+    assert "T1" in res_pair.cascaded_failures
+    impact_pair = res_pair.impact.composite_impact
+
+    assert impact_pair >= min(impact1, impact2)
+
+
+def test_superadditivity_scenario():
+    """Scenario where I(v1, v2) >> I(v1) + I(v2). Consolidated from test_pairwise_failure.py."""
+    components = [
+        ComponentData("SegA", "Node"),
+        ComponentData("SegB", "Node"),
+        ComponentData("Bridge1", "Node"),
+        ComponentData("Bridge2", "Node"),
+        ComponentData("AppA", "Application"),
+        ComponentData("AppB", "Application"),
+        ComponentData("T", "Topic"),
+        ComponentData("B1", "Broker"),
+    ]
+
+    edges = [
+        EdgeData("AppA", "SegA", "Application", "Node", "structural", "RUNS_ON"),
+        EdgeData("AppB", "SegB", "Application", "Node", "structural", "RUNS_ON"),
+        EdgeData("SegA", "Bridge1", "Node", "Node", "network", "CONNECTS_TO"),
+        EdgeData("Bridge1", "SegA", "Node", "Node", "network", "CONNECTS_TO"),
+        EdgeData("SegA", "Bridge2", "Node", "Node", "network", "CONNECTS_TO"),
+        EdgeData("Bridge2", "SegA", "Node", "Node", "network", "CONNECTS_TO"),
+        EdgeData("Bridge1", "SegB", "Node", "Node", "network", "CONNECTS_TO"),
+        EdgeData("SegB", "Bridge1", "Node", "Node", "network", "CONNECTS_TO"),
+        EdgeData("Bridge2", "SegB", "Node", "Node", "network", "CONNECTS_TO"),
+        EdgeData("SegB", "Bridge2", "Node", "Node", "network", "CONNECTS_TO"),
+        EdgeData("AppA", "T", "Application", "Topic", "logic", "PUBLISHES_TO"),
+        EdgeData("AppB", "T", "Application", "Topic", "logic", "SUBSCRIBES_TO"),
+        EdgeData("B1", "SegA", "Broker", "Node", "structural", "RUNS_ON"),
+        EdgeData("B1", "T", "Broker", "Topic", "logic", "ROUTES"),
+    ]
+
+    graph = SimulationGraph(GraphData(components=components, edges=edges))
+    sim = FailureSimulator(graph)
+
+    res1 = sim.simulate(FailureScenario(target_ids=["Bridge1"]))
+    assert res1.impact.reachability_loss == 0.0
+
+    res2 = sim.simulate(FailureScenario(target_ids=["Bridge2"]))
+    assert res2.impact.reachability_loss == 0.0
+
+    res_pair = sim.simulate(FailureScenario(target_ids=["Bridge1", "Bridge2"]))
+    assert res_pair.impact.reachability_loss > 0.0
+    assert res_pair.impact.composite_impact > (res1.impact.composite_impact + res2.impact.composite_impact)

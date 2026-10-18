@@ -73,6 +73,11 @@ markers = [
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
+    "ignore:Unknown config option. timeout:pytest.PytestConfigWarning",
+    "ignore::scipy.stats.ConstantInputWarning",
+    "ignore:invalid value encountered in scalar divide:RuntimeWarning",
+    "ignore:invalid value encountered in divide:RuntimeWarning",
+    "ignore:divide by zero encountered:RuntimeWarning",
 ]
 timeout = 120
 

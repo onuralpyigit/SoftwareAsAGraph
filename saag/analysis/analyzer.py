@@ -378,7 +378,7 @@ class QualityAnalyzer:
               effective weight in A(v) ranges from w.a_ap_c_directed (qw=0) to
               w.a_ap_c_directed + w.a_qspof (qw=1). This is intentional (QSPOF exists
               so structural SPOF risk is not masked at low QoS weight, pinned by
-              tests/test_availability_decoupling.py) and is kept small by the v4
+              tests/test_availability_dimension.py) and is kept small by the v4
               rebalance (a_qspof=0.20, down from 0.25) rather than removed.
             - AP is continuous (ap_c = ap_c_directed).
             - A(v) v4: QSPOF + directed SPOF + BR + CDI (CDI ungated, see

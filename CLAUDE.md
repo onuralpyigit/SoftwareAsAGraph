@@ -68,17 +68,31 @@ python cli/benchmark.py
 
 Full flag reference for every script: [docs/cli-pipeline-guide.md](docs/cli-pipeline-guide.md). Package/service boundaries: [ARCHITECTURE.md](ARCHITECTURE.md).
 
-### Pytest Testing Commands
+### Pytest & Verification Commands
 Tests run from the project root and do not require a live Neo4j instance unless marked `integration`:
 
 ```bash
+make test                     # standard developer test suite (skips live db & slow tests)
+make test-fast                # fast pre-merge suite (<15s, runs pytest --quick)
+make check                    # pre-merge gate: lint check + fast tests
+make test-all                 # run all tests including slow (skips integration)
+make test-integration         # run live Neo4j integration tests
+
 pytest                        # full suite
+pytest --quick                # fast pre-merge run (skips slow tests)
 pytest -x                     # halt on first failure
 pytest -k "reliability"       # pattern match
 pytest tests/test_analysis_service.py tests/test_prescription.py
 pytest -m "not integration"   # skip anything needing a live database
 pytest -m slow                # run only the slow-marked tests
 ```
+
+### Pre-Merge Checklist
+Before merging or updating `main`:
+1. Run `make check` (runs `ruff check` and `pytest --quick`).
+2. Run `make test-all` or `pytest -m "not integration"` to ensure full test suite passes.
+3. Ensure no new warning regressions or broken invariants (`test_independence_guarantee.py`, `test_groundtruth_contract.py`, etc.).
+
 
 ### Reproduction Package
 Experiment sweeps and paper tables/figures live under `reproduce/`, with their own Makefile:
