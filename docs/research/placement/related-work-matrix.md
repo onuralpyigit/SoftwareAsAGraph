@@ -405,3 +405,78 @@ The effect is small.
 - Every placement experiment must run with `replica_aware=True`, and the paper must say so.
 - The oracle used to evaluate a placement must not be the one it was optimized on. I* is
   disqualified on av-like topologies by saturation.
+
+**7.5 Consolidation at a fixed host count.**
+[reproduce/placement_tradeoff_probe.py](../../../reproduce/placement_tradeoff_probe.py),
+Part C, removes the fewer-hosts confound:
+- k used hosts, loads balanced and fixed, one host per component, `replica_aware` on.
+- Pairwise swaps sweep locality from ≈0 to its hill-climbed maximum, so only *which*
+  components share a host changes.
+- Locality is 1 − the cross-host share of topic bandwidth, frequency × size, routed through
+  the topic's broker.
+
+Spread end → local end, I_comp mean over used hosts, 3 seeds:
+
+| scenario, k | E[I_comp] | max I_comp | locality lower E in |
+|---|---|---|---|
+| atm, 8 | 0.278 → 0.241 | 0.404 → 0.381 | 2/3 |
+| atm, 4 | 0.404 → 0.357 | 0.530 → 0.553 | 3/3 |
+| av, 8 | 0.227 → 0.202 | 0.386 → 0.380 | 3/3 |
+| av, 4 | 0.419 → 0.367 | 0.535 → 0.505 | 3/3 |
+| autoware, 6 | 0.382 → 0.312 | 0.492 → 0.554 (ρ = +0.71) | 3/3 |
+| autoware, 3 | 0.521 → 0.437 | 0.680 → 0.674 | 3/3 |
+
+- **Expected impact.** The alignment survives the confound but shrinks to 10–18%, compared
+  with ~4× from using fewer hosts. I* points the same way where it is not saturated: on
+  autoware k=6 it goes 0.561 → 0.438, while on av it stays ≈0.92–0.96 throughout.
+- **Worst case.** A tail tension appears in only 2 of 6 cells: autoware k=6 (3/3 seeds) and
+  atm k=4 (2/3).
+- **Reading.** "Locality vs reliability is a fundamental trade-off" is not what the oracles
+  show. At a fixed host count, locality mostly *helps*.
+
+**7.6 Redundancy with a price.** Part D:
+- Hosts are in domains of 2.
+- Hot-standby replicas subscribe to their inputs (to stay warm) and receive state sync priced
+  at the component's published bandwidth.
+- Failure events are every single host and every domain.
+- Traffic is normalized by the replica-free total, so values can exceed 1.
+
+Averaged over the three scenarios, with locality-optimized primaries:
+- **Adding replicas at all (none → same_domain)** raises cross-host traffic by +0.29 to
+  +0.77. It buys host-outage protection: E[I_comp] over hosts falls 40–47%. It buys nothing
+  against domain outages.
+- **Anti-affinity (same_domain → cross_domain)** costs about the same cross-host traffic, but
+  cross-domain traffic rises by +0.11 to +0.39. It buys domain-outage protection:
+  - E[I_comp] over domains falls by 0.10–0.22;
+  - worst case falls by 0.09–0.12.
+  - This is a genuine Pareto trade-off, but it is the classic anti-affinity one that
+    CHASE (C1) and Kubernetes anti-affinity (K1) already encode.
+- **Budgeted anti-affinity (half the hot-standby set cross-domain).** Selection runs on I*
+  and is judged on I_comp as the held-out oracle. Domain-outage E[I_comp] by selection rule:
+
+| scenario | random | InDeg | I*-marginal |
+|---|---|---|---|
+| atm | 0.321 | 0.334 | 0.335 |
+| av | 0.301 | 0.285 | 0.296 |
+| autoware | 0.387 | 0.331 | 0.377 |
+
+  Cascade-aware selection is never the best rule. InDeg wins 2/3 and random wins on atm.
+  I* is too flat to select with: single-flip gains are exactly 0 for most components on
+  atm. This repeats the JSS pattern, where counts match cascade-aware rankers.
+
+**Implications for §3 (updated 2026-10-18).**
+- Claim 4 in its "trade-off" form is not supported. Locality and expected impact align at a
+  fixed host count, and the tail tension is scenario-specific.
+- The only robust trade-off is replica anti-affinity vs cross-domain traffic, which is known.
+- The contribution would have to come from *which* components to spread under a traffic or
+  capacity budget. On these probes the cascade model does not beat InDeg there. Before a
+  placement paper, test selection with a non-first-order oracle: either the v2 labeler items
+  in the 2026-10-08 simulation evaluation, or a mission-thread label.
+
+**Caveats.**
+- n = 3 seeds and 3 scenarios.
+- The traffic model is an assumption: warm replicas, sync priced at output bandwidth, the
+  first router only, libraries attributed to their user apps.
+- Failure domains are pairs of hosts.
+- I_comp keeps the legacy mesh rule.
+- Replica load is reported but not constrained: max load rises 1.5–2×.
