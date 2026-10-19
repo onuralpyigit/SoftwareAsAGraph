@@ -276,7 +276,7 @@ def main():
         dep = result.deployment
         display.print_subheader("Pre-deployment Plan")
         print(f"  Status       : {dep.status} ({dep.solver})")
-        if dep.status == "infeasible":
+        if dep.status in ("infeasible", "no_feasible"):
             for line in dep.diagnosis.prechecks:
                 print(f"    - {line}")
             for family, n in dep.diagnosis.families.items():

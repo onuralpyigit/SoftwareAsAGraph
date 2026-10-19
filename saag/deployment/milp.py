@@ -317,12 +317,13 @@ class DeploymentMILP:
             out.append(self.balance)
         return out
 
-    def lexi(self, objectives: List[Expr], extra: Sequence[Row] = (),
-             fix_brokers: bool = True) -> Tuple[Optional[Placement], Dict[str, Any]]:
+    def lexi(self, objectives: List[Expr], extra: Sequence[Row] = (), fix_brokers: bool = True,
+             first_limit: Optional[float] = None) -> Tuple[Optional[Placement], Dict[str, Any]]:
         """Minimise *objectives* in order, holding each optimum before the next.
 
         With ``fix_brokers`` the first stage chooses the broker hosts and later
-        stages refine the application placement around them. Free brokers make
+        stages refine the application placement around them. ``first_limit`` caps
+        the first stage's time (a probe). Free brokers make
         the traffic term quadratic-like (who shares a host with the broker), and
         HiGHS cannot close the gap on a tie-break stage that may also move them;
         the first objective is still optimised over broker placement exactly.
@@ -335,6 +336,8 @@ class DeploymentMILP:
             if limit == 0.0:
                 info["status"] = "skipped"
                 return None, info
+            if k == 0 and first_limit is not None:
+                limit = first_limit if limit is None else min(limit, first_limit)
             sol, st = self.m.solve(obj, extra, limit)
             info["stages"].append(st)
             if sol is None:
@@ -382,13 +385,15 @@ class DeploymentMILP:
     def cap(self, expr: Expr, bound: float) -> Row:
         return expr, -np.inf, bound + 1e-6 * max(1.0, abs(bound))
 
-    def front(self, points: int) -> List[Tuple[str, Optional[Placement], Dict[str, Any]]]:
+    def front(self, points: int, probe: Optional[float] = None) -> List[Tuple[str, Optional[Placement], Dict[str, Any]]]:
         """The epsilon-constraint front from min blast_exp to min traffic, both ends lexicographic.
 
         Each interior point is solved with the brokers of either anchor fixed,
-        and keeps whichever gives less traffic.
+        and keeps whichever gives less traffic. ``probe`` caps the very first
+        stage: above about 16 hosts HiGHS can sit at the root node with no
+        incumbent for the whole limit, and a longer limit does not help.
         """
-        lo_pl, lo = self.lexi(self.objectives("blast_exp", "traffic"))
+        lo_pl, lo = self.lexi(self.objectives("blast_exp", "traffic"), first_limit=probe)
         out = [("front_0", lo_pl, lo)]
         if lo_pl is None or points < 2:
             return out

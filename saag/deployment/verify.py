@@ -108,9 +108,10 @@ def select_recommendation(candidates: List[Candidate], kappa: float = 1.0) -> Di
     feasible_b = [c for c in baselines if c.feasible]
     caveats = []
     if not feasible_b and baselines:
-        caveats.append("no baseline satisfies every hard constraint; comparing against infeasible baselines")
-    pool = feasible_b or baselines
-    best = min(pool, key=lambda c: (c.held_out.expected_impact, c.name)) if pool else None
+        caveats.append("no baseline satisfies every hard constraint, so there is nothing to compare against")
+    # Only feasible placements are references or recommendations: a placement that
+    # breaks the spec is never a plan, however well the simulator scores it.
+    best = min(feasible_b, key=lambda c: (c.held_out.expected_impact, c.name)) if feasible_b else None
 
     b_star = min((c.blast_exp for c in optimizer if c.feasible), default=None)
     tied = [c for c in optimizer if c.kind in ("front", "tie") and b_star is not None
@@ -138,12 +139,12 @@ def select_recommendation(candidates: List[Candidate], kappa: float = 1.0) -> Di
     claim, text = False, ""
     indeg = next((c for c in baselines if c.name == "indeg_spread"), None)
     if rec is None:
-        text = "No placement could be scored."
+        text = "No feasible placement was found, so nothing is recommended; see the diagnosis."
     elif rec.kind == "baseline":
         text = (f"Every optimizer candidate is worse than {rec.name} on the held-out simulator; "
                 f"recommending the baseline {rec.name}.") if optimizer else f"Recommending the baseline {rec.name}."
     elif best is None:
-        text = f"{rec.name} is the least-traffic feasible candidate; no baseline was scored to compare against."
+        text = f"{rec.name} is the least-traffic feasible candidate; with no feasible baseline, no reliability claim is made."
     else:
         beats_indeg = indeg is not None and (
             indeg.held_out.expected_impact - rec.held_out.expected_impact > bar(rec, indeg))

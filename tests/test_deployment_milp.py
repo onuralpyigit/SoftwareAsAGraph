@@ -125,18 +125,30 @@ def test_capacity_shortfall_is_caught_by_prechecks():
     assert any("total cpu demand" in m for m in msgs)
 
 
-def test_deadline_versus_anti_affinity_is_diagnosed():
+def test_failover_safe_deadline_conflict_is_caught_by_prechecks():
     # P must span both domains, and every P copy must reach S1 via B within 5 ms;
-    # with 10 ms between domains no broker host works for both copies.
+    # with 10 ms between domains no broker host works for both copies. Some single
+    # host triple does meet the deadline, which is all the old precheck asked.
     inst = instance(spc=spec(latency={"intra_domain_ms": 1.0, "inter_domain_ms": 10.0}))
+    assert any(inst.path_latency(n, k, m) <= 5.0 for n in inst.hosts for k in inst.hosts for m in inst.hosts)
+    msgs = inst.prechecks()
+    assert len(msgs) == 1 and "topic T1" in msgs[0] and "distinct domains" in msgs[0]
+
+
+def test_failover_safe_precheck_never_rejects_a_feasible_spec(inst, enumerated):
+    assert enumerated and inst.prechecks() == []
+
+
+def test_bin_packing_conflict_is_diagnosed_by_the_milp():
+    # Five copies, four hosts that each hold one: total capacity suffices and every
+    # copy fits somewhere, so only the MILP can see the conflict.
+    inst = instance(spc=spec(defaults={"node": {"cpu": 1.5, "mem_mb": 4096, "p": 0.02}}))
     assert inst.prechecks() == []
     model = DeploymentMILP(inst, time_limit=30)
     pl, info = model.lexi(model.objectives("blast_exp"))
     assert pl is None and info["status"] == "infeasible"
     diag = model.diagnose()
-    # The elastic solve relaxes whichever side of the conflict is cheapest.
-    assert diag["families"] and set(diag["families"]) <= {"deadline", "anti_affinity", "replicas"}
-    assert any(c.get("topic") == "T1" or c.get("component") == "P" for c in diag["culprits"])
+    assert diag["families"] and set(diag["families"]) <= {"capacity_cpu", "replicas", "anti_affinity", "deadline"}
 
 
 def test_model_size_guard():
@@ -157,9 +169,44 @@ def test_service_falls_back_to_heuristic_when_the_model_is_too_large():
 def test_service_reports_infeasible_with_diagnosis():
     repo = MemoryRepository()
     repo.save_graph(topology(), clear=True)
-    res = DeploymentService(repo).optimize(spec(latency={"inter_domain_ms": 10.0}), seeds=(1,))
+    res = DeploymentService(repo).optimize(spec(defaults={"node": {"cpu": 1.5, "mem_mb": 4096, "p": 0.02}}),
+                                           seeds=(1,))
     assert res.status == "infeasible" and res.candidates == []
     assert res.diagnosis is not None and res.diagnosis.families
+    res = DeploymentService(repo).optimize(spec(latency={"inter_domain_ms": 10.0}), seeds=(1,))
+    assert res.status == "infeasible" and res.solver == "none" and res.diagnosis.prechecks
+
+
+def test_heuristic_never_recommends_an_infeasible_placement():
+    """When search finds nothing feasible the stage says so instead of recommending a baseline."""
+    repo = MemoryRepository()
+    repo.save_graph(topology(), clear=True)
+    tight = spec(defaults={"node": {"cpu": 1.5, "mem_mb": 4096, "p": 0.02}})
+    res = DeploymentService(repo).optimize(tight, solver="heuristic", seeds=(1,), front_points=2)
+    assert res.status == "no_feasible" and res.recommended is None
+    assert res.diagnosis.families and not any(c.feasible for c in res.candidates)
+
+
+def test_violation_score_grows_with_overload(inst):
+    pl = {"B": ["N1"], "P": ["N1", "N3"], "S1": ["N2"], "S2": ["N4"]}
+    stacked = {**pl, "S1": ["N1"], "S2": ["N1"]}
+    one_more = {**pl, "S1": ["N1"]}
+    tight = instance(spc=spec(defaults={"node": {"cpu": 2.0, "mem_mb": 4096, "p": 0.02}}))
+    # Same count (one overloaded host), so a count-based search could stack for free.
+    assert tight.violations(one_more)["capacity"] == tight.violations(stacked)["capacity"] == 1
+    assert tight.violation_score(stacked) > tight.violation_score(one_more) > tight.violation_score(pl) == 0
+    assert inst.violation_score(pl) == 0
+
+
+def test_unbinding_deadlines_are_dropped():
+    inst = instance(topology(), spec(latency={"intra_domain_ms": 0.1, "inter_domain_ms": 0.2}))
+    assert inst.deadline_pairs == [] and inst.deadline_unbinding == 1
+    assert DeploymentMILP(inst).m.family.count("deadline") == 0
+
+
+def test_probe_limit_bounds_the_first_stage(model):
+    pl, info = model.lexi(model.objectives("blast_exp", "traffic"), first_limit=0.1)
+    assert info["stages"][0]["seconds"] < 5
 
 
 def test_rule6_broker_arcs_are_excluded():

@@ -8,7 +8,8 @@ trades cross-host traffic against expected blast radius, and verifies every
 candidate on the replica-aware failure simulator. It plans a deployment; it
 never deploys anything.
 
-Exit codes: 0 success, 1 error, 2 the spec cannot be satisfied.
+Exit codes: 0 success, 1 error, 2 the spec is invalid, cannot be satisfied, or no
+feasible placement was found.
 """
 import argparse
 import json
@@ -46,8 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     solve.add_argument("--balance", action="store_true", help="Break remaining ties toward lower peak utilisation.")
     solve.add_argument("--time-limit", type=float, default=60.0, help="Seconds per MILP solve (default 60).")
     solve.add_argument("--time-budget", type=float, default=600.0, help="Seconds for all MILP solves (default 600).")
-    solve.add_argument("--max-nonzeros", type=int, default=2_000_000,
-                       help="Model size above which --solver auto uses the heuristic (default 2,000,000).")
+    solve.add_argument("--probe-limit", type=float, default=30.0,
+                       help="Seconds the first MILP stage gets to find any placement before --solver auto "
+                            "falls back to the heuristic (default 30).")
+    solve.add_argument("--heuristic-budget", type=float, default=600.0,
+                       help="Seconds for the heuristic search, on its own clock (default 600).")
+    solve.add_argument("--max-nonzeros", type=int, default=150_000,
+                       help="Model size above which --solver auto uses the heuristic (default 150,000).")
     solve.add_argument("--solver", choices=SOLVERS, default="auto",
                        help="auto: MILP with heuristic fallback; milp: MILP only; heuristic: local search only.")
 
@@ -119,7 +125,8 @@ def main():
         res = client.deploy(
             args.spec,
             front_points=args.front_points, ties=args.ties, balance=args.balance,
-            time_limit=args.time_limit, time_budget=args.time_budget, max_nonzeros=args.max_nonzeros,
+            time_limit=args.time_limit, time_budget=args.time_budget, probe_limit=args.probe_limit,
+            heuristic_budget=args.heuristic_budget, max_nonzeros=args.max_nonzeros,
             solver=args.solver, baseline_names=args.baselines, seeds=args.seeds, kappa=args.kappa,
             network_gating={"auto": None, "on": True, "off": False}[args.network_gating],
         )
@@ -142,6 +149,13 @@ def main():
     if res.status == "infeasible":
         console.print_header("No feasible placement")
         print_diagnosis(console, res.diagnosis)
+        sys.exit(EXIT_INFEASIBLE)
+    if res.status == "no_feasible":
+        console.print_header("No feasible placement found")
+        console.print_warning("Not proven infeasible: the search found no placement meeting every constraint. "
+                              "The closest candidate violates:")
+        print_diagnosis(console, res.diagnosis)
+        print(f"\n  {res.rationale}")
         sys.exit(EXIT_INFEASIBLE)
 
     console.print_subheader(f"Candidates (solver: {res.solver}, status: {res.status}, "

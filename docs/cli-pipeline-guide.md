@@ -522,7 +522,9 @@ saag -i data/scenarios/atm_system.json --deploy --deployment-spec data/deploymen
 | `--balance` | `False` | Break remaining ties toward lower peak utilisation |
 | `--time-limit` | `60` | Seconds per MILP solve |
 | `--time-budget` | `600` | Seconds for all MILP solves together |
-| `--max-nonzeros` | `2000000` | Model size above which `--solver auto` uses the heuristic |
+| `--probe-limit` | `30` | Seconds the first MILP stage gets to find any placement before `--solver auto` falls back |
+| `--heuristic-budget` | `600` | Seconds for the heuristic search, on its own clock |
+| `--max-nonzeros` | `150000` | Model size above which `--solver auto` uses the heuristic |
 | `--solver` | `auto` | `auto` (MILP, heuristic fallback), `milp` or `heuristic` |
 | `--baselines` | all four | Any of `random ffd k8s_spread indeg_spread` (`indeg_spread` is always scored) |
 | `--seeds` | `42 123 456` | Failure-simulator seeds for the held-out score |
@@ -547,7 +549,7 @@ Exit codes:
 |------|---------|
 | `0` | Success |
 | `1` | Error |
-| `2` | The spec is invalid or cannot be satisfied (with prechecks and culprit constraints) |
+| `2` | The spec is invalid, cannot be satisfied (`infeasible`, with prechecks or culprit constraints), or no feasible placement was found (`no_feasible`, with the closest candidate's violations) |
 
 ---
 

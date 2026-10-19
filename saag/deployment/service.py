@@ -51,7 +51,9 @@ class DeploymentService:
         balance: bool = False,
         time_limit: float = 60.0,
         time_budget: float = 600.0,
-        max_nonzeros: int = 2_000_000,
+        probe_limit: float = 30.0,
+        heuristic_budget: float = 600.0,
+        max_nonzeros: int = 150_000,
         solver: str = "auto",
         baseline_names: Sequence[str] = BASELINES,
         seeds: Sequence[int] = (42, 123, 456),
@@ -67,8 +69,13 @@ class DeploymentService:
                 much the held-out score depends on the solver's arbitrary pick.
             balance: Break remaining ties toward lower peak utilisation.
             time_limit: Seconds per MILP solve.
-            time_budget: Seconds for all MILP solves together.
+            time_budget: Seconds for all MILP solves together (HiGHS checks its limit only
+                between root cut rounds, so a solve can overrun it).
+            probe_limit: Seconds the first MILP stage gets to find any placement; with
+                ``solver="auto"`` the heuristic takes over if it finds none.
+            heuristic_budget: Seconds for the heuristic search, on its own clock.
             max_nonzeros: Model size above which ``solver="auto"`` uses the heuristic path.
+                The MILP found no incumbent at all on 285k nonzeros (32 hosts).
             solver: ``auto`` (MILP, heuristic fallback), ``milp`` or ``heuristic``.
             baseline_names: Baselines to score; indeg_spread is always included.
             seeds: Simulator seeds for the held-out score.
@@ -107,7 +114,7 @@ class DeploymentService:
                     raise
                 logger.warning("%s; using the heuristic path", exc)
         if model is not None:
-            front = model.front(max(front_points, 1))
+            front = model.front(max(front_points, 1), probe=probe_limit)
             lo_pl, lo_info = front[0][1], front[0][2]
             if lo_pl is None and lo_info.get("status") == "infeasible":
                 diag = model.diagnose()
@@ -140,10 +147,13 @@ class DeploymentService:
                 status = "time_limit" if "time_limit" in solved else "optimal"
         seconds["solve"] = round(time.monotonic() - t_start, 3)
 
+        t_base = time.monotonic()
         base = baselines(inst, seed=seeds[0] if seeds else 0,
                          names=sorted(set(baseline_names) | {REQUIRED_BASELINE}))
+        seconds["baselines"] = round(time.monotonic() - t_base, 3)
         if model is None:
-            deadline = t_start + time_budget
+            t_heur = time.monotonic()
+            deadline = t_heur + heuristic_budget
             starts = {k: v for k, v in base.items()}
             found = [(n, "heuristic", pl, info) for n, pl, info in
                      heuristic_front(inst, starts, max(front_points, 1), deadline=deadline)]
@@ -151,6 +161,7 @@ class DeploymentService:
             traffic_only = local_search(inst, base[start],
                                         lambda pl: (hard_violations(inst, pl), inst.traffic(pl)["traffic"]),
                                         deadline=deadline)
+            seconds["heuristic"] = round(time.monotonic() - t_heur, 3)
         if traffic_only is not None:
             base["traffic_only"] = traffic_only
         own = authored(inst)
@@ -185,9 +196,18 @@ class DeploymentService:
         fronts = [c for c in candidates if c.kind in ("front", "heuristic")]
         if fronts:
             flat = max(c.blast_exp for c in fronts) - min(c.blast_exp for c in fronts) < 1e-9
+        diagnosis = None
+        if pick["recommended"] is None:
+            # Nothing feasible was found, but nothing proved the spec unsatisfiable
+            # either (the MILP may simply have run out of time). Report the closest
+            # placement's violations rather than recommend it.
+            status = "no_feasible"
+            closest = min(candidates, key=lambda c: (hard_violations(inst, c.placement), c.name))
+            diagnosis = Diagnosis(families={f: n for f, n in closest.violations.items() if n},
+                                  culprits=[{"closest_candidate": closest.name}])
         return DeploymentResult(
             status=status, solver=used, candidates=candidates, front_flat=flat,
-            proxy_oracle_rho=proxy_oracle_rho(candidates), oracle=oracle,
+            proxy_oracle_rho=proxy_oracle_rho(candidates), oracle=oracle, diagnosis=diagnosis,
             spec_summary=bound.summary(), skipped=skipped, seconds=seconds, **pick,
         )
 

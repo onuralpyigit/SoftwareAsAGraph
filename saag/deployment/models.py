@@ -69,7 +69,7 @@ class Diagnosis:
 @dataclass
 class DeploymentResult:
     """Outcome of :meth:`DeploymentService.optimize`."""
-    status: str                       # optimal | time_limit | heuristic | infeasible
+    status: str                       # optimal | time_limit | heuristic | infeasible (proven) | no_feasible (none found)
     solver: str                       # highs | heuristic | none
     candidates: List[Candidate] = field(default_factory=list)
     recommended: Optional[str] = None

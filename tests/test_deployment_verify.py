@@ -143,3 +143,13 @@ def test_concentration_caveat_is_reported():
     cands = [_cand("front_0", "front", 0.100, 30), _cand("indeg_spread", "baseline", 0.101, 90),
              _cand("ffd", "baseline", 0.099, 95, hosts=2.0, entropy=0.3)]
     assert "concentrates load" in select_recommendation(cands)["rationale"]
+
+
+def test_without_a_feasible_baseline_there_is_no_reference_and_no_claim():
+    cands = [_cand("front_0", "front", 0.050, 30), _cand("front_1", "front", 0.060, 20, blast=2.0),
+             _cand("indeg_spread", "baseline", 0.100, 90, violations=2)]
+    pick = select_recommendation(cands)
+    assert pick["best_baseline"] is None
+    assert pick["recommended"] == "front_1" and pick["reliability_claim"] is False
+    cands = [_cand("front_0", "front", 0.050, 30, violations=1), _cand("indeg_spread", "baseline", 0.1, 90, violations=2)]
+    assert select_recommendation(cands)["recommended"] is None

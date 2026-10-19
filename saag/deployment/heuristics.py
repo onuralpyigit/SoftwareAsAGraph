@@ -46,9 +46,7 @@ class Greedy:
     def deadline_fits(self, pl: Placement, c: str, n: str) -> bool:
         """Would a copy of *c* on *n* break a deadline against copies already placed?"""
         inst = self.inst
-        for _, p, s, b, dl in inst.deadline_pairs:
-            if c not in (p, s, b):
-                continue
+        for _, p, s, b, dl in inst.deadline_of.get(c, ()):
             ps = [n] if c == p else pl.get(p, [])
             ss = [n] if c == s else pl.get(s, [])
             bs = [None] if b is None else ([n] if c == b else pl.get(b, []))
@@ -154,8 +152,9 @@ def authored(inst: Instance) -> Optional[Placement]:
     return {c: list(pl[c]) for c in inst.comps}
 
 
-def hard_violations(inst: Instance, pl: Placement) -> int:
-    return sum(inst.violations(pl).values())
+def hard_violations(inst: Instance, pl: Placement) -> float:
+    """Size-weighted violation (see Instance.violation_score); 0 exactly when feasible."""
+    return inst.violation_score(pl)
 
 
 def local_search(inst: Instance, pl: Placement, key: Key, max_passes: int = 50,

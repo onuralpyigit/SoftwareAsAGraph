@@ -161,17 +161,24 @@ On the two-tier atm topology with uniform Node specs, free brokers halved the mi
 **Determinism.** Every set is iterated as a sorted list, so the result does not depend on `PYTHONHASHSEED` (`tests/test_deployment_determinism.py`). A solve that stops at its time limit is marked `deterministic: false`.
 
 **Limits and fallback**
-- `--time-limit` applies per solve, inside an overall `--time-budget`. Solves that do not fit are listed in `skipped`.
-- With `--solver auto`, the heuristic path takes over when the model would exceed `--max-nonzeros`, or when the first anchor finds no placement. The heuristic path is a weighted-sum local search over the baselines; it has status `heuristic` and makes no optimality claim.
+- `--time-limit` applies per solve, inside an overall `--time-budget`. Solves that do not fit are listed in `skipped`. HiGHS checks its limit only between root cut rounds, so a single solve can overrun it.
+- The very first stage gets only `--probe-limit` seconds (default 30). Above about 16 hosts HiGHS can sit at the root node with no incumbent for the whole limit, and a longer limit does not help: a scaling probe on the atm large/xlarge scenarios saw none in 600 s at 32 and 48 hosts.
+- With `--solver auto`, the heuristic path takes over when the model would exceed `--max-nonzeros` (default 150,000; the MILP found incumbents at 88k nonzeros and none at 285k), or when the probe finds no placement.
+- The heuristic path is a weighted-sum local search over the baselines, on its own clock (`--heuristic-budget`, default 600 s). It has status `heuristic` and makes no optimality claim. Its violation score weights capacity by how far a host is overloaded, so the search cannot pile components onto an already overloaded host for free.
 - `--solver milp` raises instead of falling back. `--solver heuristic` forces the heuristic path.
+- Deadlines that no host path can exceed are dropped before anything else runs, so they cost nothing.
+- `seconds` reports `solve`, `baselines`, `heuristic` (when used), `verify` and `total`.
 
 **Infeasibility**
 - Sufficient conditions are checked before building the model:
   - total demand above capacity;
   - fewer allowed Nodes, or domains, than replicas;
-  - a deadline pair with no feasible host triple at all.
+  - a **failover-safe** deadline test. For one broker host k, "every publisher copy reaches every subscriber copy within the deadline" is separable: max L(n,k) + max L(k,m) ≤ deadline. Each side therefore takes its r cheapest admissible hosts, in distinct domains under domain anti-affinity. If no broker host passes, no placement can, because replicas forced into other domains must still meet the deadline.
 - If the model itself is infeasible, an elastic solve relaxes every hard-constraint family with slack variables. It reports per-family counts and the 20 rows that most need relaxing, each tagged with its topic, publisher, subscriber, broker and host.
-- The CLI exits with code 2 in this case.
+- Both cases give `status: infeasible`.
+- When no candidate or baseline satisfies every constraint but nothing proved the spec unsatisfiable (for example, the heuristic found nothing), the status is `no_feasible`. Nothing is recommended, and the diagnosis lists the closest candidate's violations.
+- **A placement that breaks the spec is never recommended or used as the reference baseline.**
+- The CLI exits with code 2 for `infeasible` and `no_feasible`.
 
 **HiGHS presolve.** The presolve bundled with scipy 1.15 can declare a feasible model infeasible after a lexicographic cap is added. Every infeasible verdict is therefore re-checked once with presolve off; the solve info records this as `presolve_retry`.
 
@@ -255,7 +262,7 @@ res.deployment.to_dict()
 
 | Field | Content |
 |:---|:---|
-| `status` | `optimal`, `time_limit`, `heuristic` or `infeasible` |
+| `status` | `optimal`, `time_limit`, `heuristic`, `infeasible` (proven) or `no_feasible` (none found; nothing recommended) |
 | `solver` | `highs`, `heuristic` or `none` |
 | `candidates[]` | Each has `name`, `kind` (front/tie/max/heuristic/baseline), `placement` (component → hosts, primary first), `traffic`, `cross_host_share`, `cross_domain_share`, `latency_weighted`, `blast_exp`, `blast_max`, `load`, `violations`, `pareto`, `aliases`, `solve`, `held_out`, `verdict`, `margin` and `noise_bar` |
 | `recommended`, `best_baseline` | Candidate names |
@@ -294,4 +301,4 @@ saag -i data/scenarios/atm_system.json --deploy --deployment-spec data/deploymen
 - **Where the tie spread is measured.** Only at the minimum-blast end of the front.
 - **Replica cost.** Replica state-sync traffic is not priced. Replicas pay only for their own subscriptions.
 - **Neo4j export.** The Neo4j path relies on `export_json()` keeping `deadline_ms`, `history_depth` and `hotstandby`. This was verified on `MemoryRepository` only.
-- **Model size.** Large topologies (enterprise and xlarge, 40–50 hosts) are expected to exceed the nonzero guard and use the heuristic path.
+- **Exact solving stops at about 16 hosts.** Beyond that the heuristic path is used. It is a simple first-improvement local search with full re-scoring per move and no swap moves, so on packed starts it can barely leave its starting baseline, and at enterprise scale one pass does not fit the budget.

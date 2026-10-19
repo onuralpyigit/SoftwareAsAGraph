@@ -99,6 +99,20 @@ class Instance:
                 for s in self.subs.get(t, ()):
                     if p != s:
                         self.deadline_pairs.append((t, p, s, self.router[t], float(dl)))
+        # A deadline no host path can exceed constrains nothing; dropping it here
+        # keeps the MILP, the prechecks and the heuristics from scanning host
+        # triples for it (199 s and zero rows on enterprise).
+        worst_direct = max((v for row in self.L.values() for v in row.values()), default=0.0)
+        worst_brokered = max((max(self.L[n][k] for n in self.hosts) + max(self.L[k][m] for m in self.hosts)
+                              for k in self.hosts), default=0.0)
+        binding = [pr for pr in self.deadline_pairs
+                   if pr[4] < (worst_direct if pr[3] is None else worst_brokered)]
+        self.deadline_unbinding = len(self.deadline_pairs) - len(binding)
+        self.deadline_pairs = binding
+        self.deadline_of: Dict[str, List[Tuple[str, str, str, Optional[str], float]]] = defaultdict(list)
+        for pr in self.deadline_pairs:
+            for c in {pr[1], pr[2], pr[3]} - {None}:
+                self.deadline_of[c].append(pr)
 
         # Failure events: every host, and every domain with at least two hosts.
         self.events: Dict[str, List[str]] = {h: [h] for h in self.hosts}
@@ -215,6 +229,19 @@ class Instance:
             out["use_all_hosts"] = sum(h not in used for h in self.hosts)
         return out
 
+    def violation_score(self, pl: Placement) -> float:
+        """Hard-constraint violation weighted by size, for search: 0 exactly when feasible.
+
+        Counting overloaded hosts alone lets a search pile every component onto
+        one already-overloaded host for free, so capacity costs 1 per
+        overloaded host plus its relative excess.
+        """
+        v = self.violations(pl)
+        cpu, mem = self.usage(pl)
+        excess = sum(max(0.0, cpu[h] / self.cap_cpu[h] - 1) + max(0.0, mem[h] / self.cap_mem[h] - 1)
+                     for h in self.hosts)
+        return sum(n for f, n in v.items()) + excess
+
     def load(self, pl: Placement) -> Dict[str, float]:
         """Load concentration: peak utilisation, hosts used, evenness of copies per host."""
         cpu, mem = self.usage(pl)
@@ -251,12 +278,42 @@ class Instance:
             elif self.spec.anti_affinity == "domain" and self.r[c] > 1 and len({self.dom[h] for h in fit[c]}) < self.r[c]:
                 out.append(f"{c} needs {self.r[c]} copies in distinct domains but its allowed Nodes span "
                            f"{len({self.dom[h] for h in fit[c]})}")
+        strictest: Dict[Tuple[str, str, Optional[str]], Tuple[float, str]] = {}
         for t, p, s, b, dl in self.deadline_pairs:
-            brokers = fit[b] if b is not None else [None]
-            if not any(self.path_latency(n, k, m) <= dl for n in fit[p] for k in brokers for m in fit[s]):
-                out.append(f"topic {t}: no allowed hosts for {p} -> {s}" + (f" via {b}" if b else "")
-                           + f" meet its {dl:g} ms deadline")
+            if (p, s, b) not in strictest or dl < strictest[(p, s, b)][0]:
+                strictest[(p, s, b)] = (dl, t)
+        for (p, s, b), (dl, t) in sorted(strictest.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or "")):
+            if not self._deadline_satisfiable(fit, p, s, b, dl):
+                out.append(f"topic {t}: no allowed hosts let every copy of {p} reach every copy of {s}"
+                           + (f" via {b}" if b else "") + f" within its {dl:g} ms deadline"
+                           + (" (replicas must sit in distinct domains)" if max(self.r[p], self.r[s]) > 1 else ""))
         return out
+
+
+    def _min_spread(self, values: Dict[str, float], r: int) -> float:
+        """Smallest possible max(values) over r copies, in distinct domains under domain anti-affinity."""
+        if self.spec.anti_affinity == "domain" and r > 1:
+            best: Dict[str, float] = {}
+            for h, v in values.items():
+                best[self.dom[h]] = min(v, best.get(self.dom[h], math.inf))
+            values = best
+        ranked = sorted(values.values())
+        return ranked[r - 1] if len(ranked) >= r else math.inf
+
+    def _deadline_satisfiable(self, fit: Dict[str, List[str]], p: str, s: str, b: Optional[str], dl: float) -> bool:
+        """Necessary condition for the failover-safe deadline row of (p, s, b).
+
+        Every copy of p must reach every copy of s through every copy of b. For
+        one broker host k the condition is separable, max_n L(n,k) + max_m L(k,m)
+        <= dl, so each side takes its r cheapest admissible hosts. Any feasible
+        placement passes this for each of its broker copies; brokerless pairs
+        fall back to "some host pair works".
+        """
+        if b is None:
+            return any(self.L[n][m] <= dl for n in fit[p] for m in fit[s])
+        return any(self._min_spread({n: self.L[n][k] for n in fit[p]}, self.r[p])
+                   + self._min_spread({m: self.L[k][m] for m in fit[s]}, self.r[s]) <= dl
+                   for k in fit[b])
 
 
 def _topic_field(topic: Dict[str, Any], key: str) -> Any:
