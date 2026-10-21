@@ -16,6 +16,13 @@ availability and fault tolerance **before deployment**.
 > replica-aware simulator, with no reliability claim unless the simulator confirms one beyond
 > noise.
 
+> **Study design (2026-10-21).** The paper is now planned as a pre-registered empirical study:
+> ICSA first, then a TOSEM extension with a fault-injection testbed. See
+> [PREREGISTRATION.md](PREREGISTRATION.md), [oracles.md](oracles.md), [priors.md](priors.md),
+> [outline.md](outline.md), [draft.md](draft.md) and [tosem-extension.md](tosem-extension.md).
+> Claim 4 is tested there as H1. The CHASE baseline is operationalised in
+> [PREREGISTRATION.md §3.1](PREREGISTRATION.md#31-chase-operationalisation).
+
 ---
 
 ## 1. Matrix
@@ -241,6 +248,7 @@ has been seen at abstract level)
 |---|---|---|
 | Kubernetes default + topology spread | K1 | Cheapest credible baseline |
 | CHASE-style greedy filter pipeline | C1 | Criticality order → capacity → delay → co-/anti-location rule (tolerance vs sponsor recovery time) → max-availability host → anti-located replicas. Needs tolerance and recovery-time inputs |
+| CHASE, as operationalised for the study | C1 | Tolerance = min `deadline_ms` over the dependent's inputs from the sponsor. Recovery = failover time `R_f` (replicated sponsor; 1 s primary, 50 ms and 10 s swept) or host MTTR (1 h). Co-locate if tolerance < recovery, else anti-locate. See [PREREGISTRATION.md §3.1](PREREGISTRATION.md#31-chase-operationalisation) |
 | Capacitated task allocation (ILP) | C2, E3 | C2's exact objective: Σ a_ip·x_ip + Σ_(i,j)∈E Σ_p a_ip(1−a_jp)·c_ij under memory capacity, with c_ij from topic publication rates. Linearizes to a standard ILP. It is the cost-only anchor of the Pareto front, and it isolates what the failure-impact term adds |
 | NSGA-II over allocations | C4, A2, A3, F3 | Same search, analytic reliability objective instead of cascade impact |
 | Predecessor co-location heuristic | E1 | The opposite of spreading |
