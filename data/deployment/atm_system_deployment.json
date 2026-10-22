@@ -1,0 +1,262 @@
+{
+ "version": 1,
+ "description": "atm_system with the synthetic resource overlay of the placement MILP probe (docs/research/placement/related-work-matrix.md \u00a77.7): four metro-area failure domains, an explicit latency matrix, brokers pinned to their authored hosts and every host used. Resource figures are synthetic, not measured.",
+ "nodes": {
+  "N0": {
+   "cpu": 21,
+   "mem_mb": 14336,
+   "p": 0.0324,
+   "domain": "D1"
+  },
+  "N1": {
+   "cpu": 21,
+   "mem_mb": 14336,
+   "p": 0.0368,
+   "domain": "D3"
+  },
+  "N2": {
+   "cpu": 12,
+   "mem_mb": 8192,
+   "p": 0.0223,
+   "domain": "D3"
+  },
+  "N3": {
+   "cpu": 21,
+   "mem_mb": 14336,
+   "p": 0.042,
+   "domain": "D1"
+  },
+  "N4": {
+   "cpu": 12,
+   "mem_mb": 8192,
+   "p": 0.0301,
+   "domain": "D2"
+  },
+  "N5": {
+   "cpu": 21,
+   "mem_mb": 14336,
+   "p": 0.0292,
+   "domain": "D2"
+  },
+  "N6": {
+   "cpu": 21,
+   "mem_mb": 14336,
+   "p": 0.0454,
+   "domain": "D0"
+  },
+  "N7": {
+   "cpu": 12,
+   "mem_mb": 8192,
+   "p": 0.0273,
+   "domain": "D0"
+  }
+ },
+ "domains": {
+  "D0": {
+   "p": 0.0044
+  },
+  "D1": {
+   "p": 0.0042
+  },
+  "D2": {
+   "p": 0.0023
+  },
+  "D3": {
+   "p": 0.0072
+  }
+ },
+ "latency": {
+  "matrix_ms": {
+   "N0": {
+    "N1": 9.0,
+    "N2": 9.0,
+    "N3": 0.5,
+    "N4": 5.0,
+    "N5": 5.0,
+    "N6": 3.0,
+    "N7": 3.0
+   },
+   "N1": {
+    "N2": 0.5,
+    "N3": 9.0,
+    "N4": 7.0,
+    "N5": 7.0,
+    "N6": 12.0,
+    "N7": 12.0
+   },
+   "N2": {
+    "N3": 9.0,
+    "N4": 7.0,
+    "N5": 7.0,
+    "N6": 12.0,
+    "N7": 12.0
+   },
+   "N3": {
+    "N4": 5.0,
+    "N5": 5.0,
+    "N6": 3.0,
+    "N7": 3.0
+   },
+   "N4": {
+    "N5": 0.5,
+    "N6": 6.0,
+    "N7": 6.0
+   },
+   "N5": {
+    "N6": 6.0,
+    "N7": 6.0
+   },
+   "N6": {
+    "N7": 0.5
+   }
+  }
+ },
+ "apps": {
+  "A0": {
+   "cpu": 1.76,
+   "mem_mb": 2048
+  },
+  "A1": {
+   "cpu": 2.3,
+   "mem_mb": 2048
+  },
+  "A2": {
+   "cpu": 1.27,
+   "mem_mb": 256
+  },
+  "A3": {
+   "cpu": 2.3,
+   "mem_mb": 256
+  },
+  "A4": {
+   "cpu": 1.45,
+   "mem_mb": 2048
+  },
+  "A5": {
+   "cpu": 1.66,
+   "mem_mb": 512
+  },
+  "A6": {
+   "cpu": 1.41,
+   "mem_mb": 1024
+  },
+  "A7": {
+   "cpu": 1.93,
+   "mem_mb": 1024
+  },
+  "A8": {
+   "cpu": 3.55,
+   "mem_mb": 256
+  },
+  "A9": {
+   "cpu": 0.57,
+   "mem_mb": 256
+  },
+  "A10": {
+   "cpu": 2.07,
+   "mem_mb": 1024
+  },
+  "A11": {
+   "cpu": 2.62,
+   "mem_mb": 512
+  },
+  "A12": {
+   "cpu": 1.84,
+   "mem_mb": 1024
+  },
+  "A13": {
+   "cpu": 0.71,
+   "mem_mb": 1024
+  },
+  "A14": {
+   "cpu": 2.75,
+   "mem_mb": 2048
+  },
+  "A15": {
+   "cpu": 1.13,
+   "mem_mb": 2048
+  },
+  "A16": {
+   "cpu": 1.22,
+   "mem_mb": 2048
+  },
+  "A17": {
+   "cpu": 0.5,
+   "mem_mb": 2048
+  },
+  "A18": {
+   "cpu": 0.94,
+   "mem_mb": 1024
+  },
+  "A19": {
+   "cpu": 1.81,
+   "mem_mb": 2048
+  },
+  "A20": {
+   "cpu": 0.5,
+   "mem_mb": 256
+  },
+  "A21": {
+   "cpu": 2.09,
+   "mem_mb": 512
+  },
+  "A22": {
+   "cpu": 3.57,
+   "mem_mb": 256
+  },
+  "A23": {
+   "cpu": 1.13,
+   "mem_mb": 2048
+  },
+  "A24": {
+   "cpu": 0.49,
+   "mem_mb": 2048
+  },
+  "A25": {
+   "cpu": 1.85,
+   "mem_mb": 256
+  }
+ },
+ "brokers": {
+  "B0": {
+   "cpu": 2.0,
+   "mem_mb": 2048,
+   "pin": [
+    "N3"
+   ]
+  },
+  "B1": {
+   "cpu": 2.0,
+   "mem_mb": 2048,
+   "pin": [
+    "N7"
+   ]
+  },
+  "B2": {
+   "cpu": 2.0,
+   "mem_mb": 2048,
+   "pin": [
+    "N7"
+   ]
+  },
+  "B3": {
+   "cpu": 2.0,
+   "mem_mb": 2048,
+   "pin": [
+    "N1"
+   ]
+  },
+  "B4": {
+   "cpu": 2.0,
+   "mem_mb": 2048,
+   "pin": [
+    "N6"
+   ]
+  }
+ },
+ "constraints": {
+  "anti_affinity": "domain",
+  "use_all_hosts": true,
+  "max_utilization": 1.0
+ }
+}

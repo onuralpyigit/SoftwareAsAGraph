@@ -222,6 +222,27 @@ class SimulationService:
             seed=seed,
         )
 
+    def run_failure_events(self, events: Dict[str, List[str]], seed: Optional[int] = 42,
+                           propagation_threshold: float = 0.2) -> Dict[str, FailureResult]:
+        """Run one simultaneous-failure scenario per named event.
+
+        Each event fails its targets together (e.g. every host of a failure
+        domain). Unlike ``run_failure_simulation``, the discrete-event baseline
+        is primed first, so the flow-disruption term is live. Events run in
+        sorted order, each with a seed derived from (seed, event name), so a
+        result does not depend on which other events share the call.
+        """
+        graph, sim = self._failure_sim(propagation_threshold)
+        self._prime_baseline_flows(graph, sim)
+        return {
+            name: sim.simulate(FailureScenario(
+                target_ids=list(events[name]),
+                description=f"Failure event: {name}",
+                seed=FailureSimulator._derive_seed(seed, name),
+            ))
+            for name in sorted(events)
+        }
+
     def run_failure_simulation_pairwise(self, layer: str = "system", cascade_probability: float = 1.0,
                                         library_cascade_probability: Optional[float] = None,
                                         propagation_threshold: float = 0.2,

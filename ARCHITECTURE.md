@@ -216,6 +216,14 @@ Generates rule-based architectural optimization policies (logical splitting, hos
 - `EditVerifier` — The per-edit acceptance filter and its arithmetic.
 - `PrescribeService` — Orchestrates the above and assembles the `PrescribeResult`.
 
+### `deployment/` — Pre-deployment Planning
+Maps Applications and Brokers to Nodes under a deployment spec (capacity, failure domains, latency, replicas, pins, topic deadlines), and verifies every candidate on `FailureSimulator(replica_aware=True)` before recommending one. It plans; it never deploys. See [docs/deployment.md](docs/deployment.md).
+- `spec.load_spec` / `bind_spec` — Parse and validate the spec against a topology; resolve latency.
+- `DeploymentMILP` — Exact placement MILP (scipy/HiGHS): traffic vs. replica-aware blast coverage, ε-constraint front, tie enumeration, elastic infeasibility diagnosis.
+- `heuristics` — Baselines (`random`, `ffd`, `k8s_spread`, `indeg_spread`) and the local-search fallback for large models.
+- `verify.select_recommendation` — Held-out comparison against the best baseline with a seed-and-tie noise bar.
+- `DeploymentService` — Orchestrates the above and assembles the `DeploymentResult`.
+
 ### `visualization/` — Step 8 Visualization Engine
 Compiles the metrics, classifications, problems, and simulations into visual dashboard formats.
 - `VisualizationService` — Assembles the multi-stage dataset into serializable models; composes analysis + prediction + simulation + validation services.
@@ -233,7 +241,7 @@ Supports the paper's result tables independently of the runtime pipeline.
 
 ### `usecases/` — Application Layer orchestrators
 Thin interactor classes representing the application boundaries:
-- **Core Pipeline Use Cases**: `ModelGraphUseCase`, `AnalyzeGraphUseCase`, `PredictGraphUseCase`, `SimulateGraphUseCase`, `ValidateGraphUseCase`, `PrescribeGraphUseCase`, `VisualizeGraphUseCase`, `MultiLayerAnalysisUseCase`.
+- **Core Pipeline Use Cases**: `ModelGraphUseCase`, `AnalyzeGraphUseCase`, `PredictGraphUseCase`, `SimulateGraphUseCase`, `ValidateGraphUseCase`, `PrescribeGraphUseCase`, `VisualizeGraphUseCase`, `MultiLayerAnalysisUseCase`, plus `DeployGraphUseCase` for pre-deployment planning.
 - **Pathway A (Diagnostic)**: `DiagnosticUseCase` (alias `DiagnosticGraphUseCase`) executes deterministic ISO-RM quality attribution, anti-pattern detection, and natural language explanations.
 - **Pathway B (Predictive)**: `PredictiveUseCase` (alias `PredictiveGraphUseCase`) executes inductive HGT neural message passing and blast radius forecasting ($\hat{I}^*(v)$) with 16-D QoS edge encodings.
 - **Triage Bridge**: `TriageUseCase` (alias `TriageGraphUseCase`) delegates to `saag.analysis.triage.triage()` to scope Pathway A's root-cause attribution to Pathway B's Top-*K* shortlist.
@@ -269,7 +277,7 @@ The REST API exposes the analytical pipeline as a JSON web service via FastAPI (
 
 ## Command Line Interface (`cli/`)
 
-Scripts mirror the pipeline stages. Nine have console-script entry points installed by `pyproject.toml`; the rest are run as `python cli/<script>.py`.
+Scripts mirror the pipeline stages. Ten have console-script entry points installed by `pyproject.toml`; the rest are run as `python cli/<script>.py`.
 
 | Script | Stage | Entry point |
 |:---|:---|:---|
@@ -285,6 +293,7 @@ Scripts mirror the pipeline stages. Nine have console-script entry points instal
 | `simulate_graph.py` | Step 5 — `fault-inject` \| `message-flow` \| `combined` | `saag-simulate` |
 | `validate_graph.py` | Step 6 — `single` \| `sweep` \| `report` \| `compare` \| `harness` | `saag-validate` |
 | `prescribe_graph.py` | Step 7 — optimize + closed-loop validate | *(none)* |
+| `deploy_graph.py` | Pre-deployment — application-to-node planning + held-out verification | `saag-deploy` |
 | `visualize_graph.py` | Step 8 — HTML dashboard | `saag-visualize` |
 | `statistics_graph.py` | Cross-cutting topology/communication stats | *(none)* |
 | `benchmark.py` | Scale-preset performance benchmark | *(none)* |

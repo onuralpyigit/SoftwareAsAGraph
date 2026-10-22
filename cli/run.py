@@ -62,6 +62,9 @@ def main():
     group.add_argument("--simulate", action="store_true", help="Run failure simulation stage")
     group.add_argument("--validate", action="store_true", help="Run validation stage (compare prediction vs simulation)")
     group.add_argument("--prescribe", action="store_true", help="Run prescriptive remediation stage")
+    group.add_argument("--deploy", action="store_true",
+                       help="Run pre-deployment planning (application-to-node mapping; needs --deployment-spec). "
+                            "Plans only; nothing is deployed.")
     group.add_argument("--visualize", action="store_true", help="Run visualization stage (generates HTML dashboard)")
     
     # Stage-specific options
@@ -79,6 +82,9 @@ def main():
                             "one's RM root-cause diagnosis. Requires diagnose to run "
                             "this same invocation (--diagnose or --all); --all alone "
                             "does not imply a --triage-k value.")
+    opts.add_argument("--deployment-spec", metavar="FILE",
+                      help="Deployment spec for --deploy (node capacity, failure domains, latency, demands). "
+                           "With --all, the deploy stage runs only when this is given.")
     opts.add_argument("--sim-mode", default="exhaustive", help="Simulation mode (e.g., exhaustive, monte_carlo)")
     opts.add_argument("--no-network", action="store_true", help="Skip interactive network in visualization")
     opts.add_argument("--no-matrix", action="store_true", help="Skip dependency matrix in visualization")
@@ -102,9 +108,11 @@ def main():
     )
 
     # Ensure at least one stage is selected
-    stages = [args.all, args.generate, bool(args.input), args.analyze, args.predict, args.diagnose, args.simulate, args.validate, args.prescribe, args.visualize]
+    stages = [args.all, args.generate, bool(args.input), args.analyze, args.predict, args.diagnose, args.simulate, args.validate, args.prescribe, args.deploy, args.visualize]
     if not any(stages):
         parser.error("No stages selected. Use --all or specific stage flags.")
+    if args.deploy and not args.deployment_spec:
+        parser.error("--deploy needs --deployment-spec FILE.")
 
     # First-run guard: --all (or explicit --predict) requires a trained GNN checkpoint.
     # Without it the predict stage will fail with a cryptic FileNotFoundError.
@@ -195,6 +203,9 @@ def main():
     if args.prescribe or args.all:
         pipeline.prescribe()
 
+    if args.deploy or (args.all and args.deployment_spec):
+        pipeline.deploy(args.deployment_spec)
+
     if args.visualize or args.all:
         layers = _resolve_layers(args, layer_explicit)
 
@@ -261,6 +272,20 @@ def main():
         if len(result.prescription.applied_changes) > 5:
             print(f"    ... and {len(result.prescription.applied_changes) - 5} more changes.")
     
+    if result.deployment:
+        dep = result.deployment
+        display.print_subheader("Pre-deployment Plan")
+        print(f"  Status       : {dep.status} ({dep.solver})")
+        if dep.status in ("infeasible", "no_feasible"):
+            for line in dep.diagnosis.prechecks:
+                print(f"    - {line}")
+            for family, n in dep.diagnosis.families.items():
+                print(f"    - {family}: {n} constraint(s) cannot be met together")
+        else:
+            print(f"  Recommended  : {dep.recommended}   (best baseline: {dep.best_baseline})")
+            print(f"  Reliability claim: {dep.reliability_claim}")
+            print(f"  {dep.rationale}")
+
     # Anti-patterns (produced by the Diagnose stage; fall back to the
     # Predict stage's own problems for callers who bundled diagnose=True
     # into predict() instead of running diagnose() separately)

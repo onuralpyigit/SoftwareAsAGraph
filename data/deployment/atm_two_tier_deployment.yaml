@@ -1,0 +1,33 @@
+# Deployment spec for data/network/atm_two_tier_system.json (see docs/deployment.md).
+#
+# Two racks behind top-of-rack switches SW0 (N0, N3, N5, N6) and SW1 (N1, N2,
+# N4, N7), joined by two core routers. Each rack is a failure domain (shared
+# power and ToR switch). Latency comes from CONNECTS_TO hop counts: 2 hops
+# within a rack, 4 across racks. Resource figures are illustrative, not
+# measured.
+version: 1
+defaults:
+  node:   {cpu: 8, mem_mb: 16384, p: 0.02}
+  domain: {p: 0.005}
+  app:    {cpu: 1.0, mem_mb: 512}          # replicas default to 2 for hotstandby apps
+  broker: {cpu: 2.0, mem_mb: 2048}         # brokers are placed by the optimizer unless pinned
+nodes:
+  N0: {cpu: 4, mem_mb: 8192, p: 0.03, domain: rack-0}    # weather-node: smaller, older host
+  N3: {domain: rack-0}
+  N5: {domain: rack-0}
+  N6: {cpu: 16, mem_mb: 32768, domain: rack-0}           # fdps-main
+  N1: {domain: rack-1}
+  N2: {domain: rack-1}
+  N4: {domain: rack-1}
+  N7: {domain: rack-1}
+domains:
+  rack-0: {p: 0.004}
+  rack-1: {p: 0.004}
+latency:
+  per_hop_ms: 0.25
+apps:
+  A0: {cpu: 2.0, mem_mb: 2048}             # trajectory-predictor
+constraints:
+  anti_affinity: domain
+  use_all_hosts: false
+  max_utilization: 0.9

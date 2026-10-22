@@ -315,3 +315,18 @@ def test_pipeline_diagnose_standalone_cold_start(monkeypatch):
     assert result.diagnosis is sentinel_diagnosis
     assert result.triage is sentinel_triage
 
+
+
+def test_pipeline_deploy_kwargs_reach_client_without_analyze(monkeypatch):
+    """deploy() reads only the topology, so it runs without analyze() and forwards its options."""
+    repo = MemoryRepository()
+    repo.save_graph({"applications": [{"id": "AppA", "name": "App A"}], "relationships": {}})
+    pipeline = Pipeline(repo=repo)
+    captured = {}
+    monkeypatch.setattr(pipeline.client, "deploy",
+                        lambda spec, **kw: captured.update(spec=spec, **kw) or "plan")
+
+    result = pipeline.deploy("spec.yaml", ties=2, solver="heuristic").run()
+
+    assert result.deployment == "plan"
+    assert captured == {"spec": "spec.yaml", "ties": 2, "solver": "heuristic"}

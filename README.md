@@ -55,6 +55,7 @@ Each capability is a pipeline stage with its own CLI script, SDK method, and met
 | 5 | **Simulate** | Injects faults and propagates cascades over the raw structural graph to obtain ground-truth impact — training labels for stage 3 and the offline oracle for stage 6 | $I^*(v)$ composite and per-dimension $I_R, I_M$ (itself $\alpha\cdot I_{FT}+(1-\alpha)\cdot I_A$) | [failure-simulation.md](docs/failure-simulation.md) |
 | 6 | **Validate** | Correlates predictions against simulated ground truth: Spearman $\rho$, Kendall $\tau$, F1, predictive gain, bootstrap CIs, Wilcoxon — scored against seven gates | Statistical evidence of predictive validity | [validation.md](docs/validation.md) |
 | 7 | **Prescribe** | Generates stakeholder-oriented architectural edits (topic splits, host reallocations, QoS upgrades) and accepts each only if a closed-loop counterfactual simulation confirms the improvement | `PrescribeResult` with baseline vs. mutated SRI | [prescription.md](docs/prescription.md) |
+| — | *Deploy (pre-deployment)* | Maps Applications and Brokers to Nodes under a deployment spec (capacity, failure domains, latency, replicas, topic deadlines); verifies every candidate on the replica-aware failure simulator and claims a reliability gain only beyond noise | `DeploymentResult` with recommended placement | [deployment.md](docs/deployment.md) |
 | 8 | **Visualize** | Renders network graphs, dependency matrices, cascade heatmaps, and RM radar charts | Self-contained `dashboard.html` | [visualization.md](docs/visualization.md) |
 
 ```
