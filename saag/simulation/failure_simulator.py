@@ -23,7 +23,6 @@ from __future__ import annotations
 import logging
 import random
 import statistics
-import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Tuple, Any, Optional
 from enum import Enum
@@ -32,6 +31,7 @@ from collections import defaultdict
 from .graph import SimulationGraph, NETWORK_TYPES
 from saag.core.network import evaluate, link_key, topic_load_mbps
 from .models import ComponentState, FailureMode, CascadeRule, FailureScenario, ImpactMetrics, CascadeEvent, FailureResult, MonteCarloResult, RuntimeTelemetryProfile
+from ._stats import derive_seed
 from saag.core.models import TOPIC_CRITICALITY_ORD, MAX_TOPIC_CRITICALITY_ORD
 
 #: Split of the fragmentation term between "how many islands" and "how much QoS
@@ -258,16 +258,8 @@ class FailureSimulator:
     
     @staticmethod
     def _derive_seed(run_seed: Optional[int], component_id: str) -> Optional[int]:
-        """Derive a per-component seed from a run-level seed.
-
-        Uses zlib.crc32 rather than hash() because hash() on str is salted by
-        PYTHONHASHSEED, which would make labels differ across processes.
-        Deriving from the component id (not its index) keeps a component's
-        label independent of how many other components share the sweep.
-        """
-        if run_seed is None:
-            return None
-        return (run_seed ^ zlib.crc32(component_id.encode("utf-8"))) & 0x7FFFFFFF
+        """Derive a per-component seed from a run-level seed (see `_stats.derive_seed`)."""
+        return derive_seed(run_seed, component_id)
 
     def topic_severity(self, topic_id: str) -> float:
         """Operational severity of losing *topic_id*: w(t) × its message rate.

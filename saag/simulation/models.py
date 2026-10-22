@@ -284,10 +284,27 @@ class EventResult:
 
 @dataclass
 class RuntimeTelemetryProfile:
-    """Holds empirical execution data to calibrate the simulation loop."""
+    """Holds empirical execution data to calibrate the simulation loop.
+
+    The first three fields are read by `FailureSimulator`. Note that
+    `edge_failure_correlation` is used there as a *cascade propagation
+    probability*, so a measured message-drop rate must not be written into it:
+    `saag.simulation.calibration.TelemetryCalibrator` never does.
+
+    The remaining fields are filled by `TelemetryCalibrator` from observed
+    telemetry and read by `MessageFlowSimulator(telemetry_profile=...)`, each
+    overriding the declared or calibrated value it measures.
+    """
     msg_rate_per_sec: Dict[str, float] = field(default_factory=dict)       # topic_id -> throughput
     edge_failure_correlation: Dict[Tuple[str, str], float] = field(default_factory=dict) # (src, tgt) -> drop rate
     custom_starvation_bounds: Dict[str, float] = field(default_factory=dict) # app_id -> custom threshold
+    #: app_id -> {"dist": "exponential" | "lognormal", "mean_s": float, "cv": float, "n": int}
+    service_time_dist: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    #: app_id -> inferred trigger policy ("periodic" | "all_of" | "any_of"), with evidence
+    trigger_policy: Dict[str, str] = field(default_factory=dict)
+    trigger_evidence: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    #: Where the numbers came from (source, window, sample counts).
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
