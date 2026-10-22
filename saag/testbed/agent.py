@@ -13,7 +13,9 @@ inside a container.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
+import signal
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -26,25 +28,33 @@ CONTROL_POLL_S = 0.1
 def run_host(plan: Dict, host: str, transport, sink: TelemetrySink, duration_s: float,
              control_dir: Optional[Path] = None, seed: int = 0) -> None:
     hosts = plan["hosts"] if host == "all" else {host: plan["hosts"][host]}
-    apps = [a for h in hosts.values() for a in h["apps"]]
-    brokers = [b for h in hosts.values() for b in h["brokers"]]
     parts: Dict[str, object] = {}
-    for b in brokers:
-        parts[b] = BrokerRelay(b, plan, transport, sink, seed=seed)
-    for a in apps:
-        parts[a] = AppRuntime(a, plan, transport, sink, seed=seed)
+    for h, residents in hosts.items():
+        for b in residents["brokers"]:
+            parts[b] = BrokerRelay(b, plan, transport, sink, seed=seed)
+        for a in residents["apps"]:
+            replicated = len(plan["apps"][a].get("hosts", [])) > 1
+            parts[f"{a}@{h}" if replicated else a] = AppRuntime(
+                a, plan, transport, sink, seed=seed, host=h)
     for p in parts.values():
         p.start()
     end = time.time() + duration_s
-    stamps: Dict[str, float] = {}
+    stamps: Dict[str, tuple] = {}
     try:
         while time.time() < end:
             if control_dir is not None:
                 for name, part in parts.items():
-                    f = control_dir / f"{name}.json"
-                    if f.exists() and f.stat().st_mtime != stamps.get(name):
-                        stamps[name] = f.stat().st_mtime
-                        part.control = Control.from_dict(json.loads(f.read_text()))
+                    # Component-level control applies to every instance;
+                    # instance-level ("A@H1", a host fault in local mode) on top.
+                    files = [control_dir / f"{name.partition('@')[0]}.json", control_dir / f"{name}.json"]
+                    stamp = tuple(f.stat().st_mtime if f.exists() else None for f in files)
+                    if stamp != stamps.get(name, (None, None)):
+                        stamps[name] = stamp
+                        state: Dict = {}
+                        for f in files:
+                            if f.exists():
+                                state.update(json.loads(f.read_text()))
+                        part.control = Control.from_dict(state)
             time.sleep(CONTROL_POLL_S)
     finally:
         for p in parts.values():
@@ -64,6 +74,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--domain", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
+    # `docker kill -s USR1 <container>` dumps every thread's stack to the log.
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
 
     plan = json.loads(args.deployment.read_text())
     if args.transport == "dds":

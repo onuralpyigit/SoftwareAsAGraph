@@ -9,8 +9,8 @@ process. `RuntimeController` owns all of that for one run:
 * the fault schedule (`FaultSpec`), with recovery for bounded faults;
 * the deployment in the data path (``deployment_model="stations"``): broker
   stations on ROUTES with failover after a detection lease, host CPU shared by
-  co-located applications (RUNS_ON), and host/link reachability over
-  CONNECTS_TO;
+  co-located applications (RUNS_ON), and -- with ``network_gating`` --
+  host/link reachability over CONNECTS_TO;
 * hot-standby failover for components that declare ``hotstandby``;
 * a binned delivery timeline from which recovery time is measured.
 
@@ -169,7 +169,11 @@ class RuntimeController:
                 self.residents[h].add(comp)
 
         net_vertices = [n for n, t in self.node_type.items() if t in NETWORK_TYPES]
-        self.fabric = Fabric(net_vertices, links) if (self.deployment and links) else None
+        # Opt-in, as everywhere else in the repo: the corpus's CONNECTS_TO is a
+        # sparse host mesh, not a complete network, so treating it as the only
+        # way between hosts would partition hosts it never meant to isolate.
+        self.fabric = (Fabric(net_vertices, links)
+                       if (self.deployment and sim.network_gating and links) else None)
         self.cut: Set[frozenset] = set()
         self._islands: Optional[Dict[str, int]] = None
 

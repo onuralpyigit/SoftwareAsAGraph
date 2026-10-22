@@ -18,13 +18,23 @@ deadline_ms            Deadline (only when declared)
 transport_priority     TransportPriority (LOW 0, MEDIUM 1, HIGH 2, CRITICAL 3)
 partition              Partition (ingress / egress / direct, see runtime)
 =====================  =======================================================
+
+Samples are taken by one Python poller thread blocked on a WaitSet, never by
+Cyclone listener callbacks. A listener runs Python on Cyclone's receive thread
+while that thread holds the reader's lock and waits for the GIL; a Python thread
+holding the GIL and writing to a topic with a local reader then needs the same
+lock. With every component writing and reading the heartbeat topic in one
+participant, that deadlock froze whole hosts on the first Docker runs.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from typing import Any, Callable, Dict, Mapping
+
+logger = logging.getLogger(__name__)
 
 PRIORITY_VALUE = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3, "URGENT": 3, "HIGHEST": 3}
 
@@ -51,24 +61,22 @@ class DdsTransport:
     """One DomainParticipant; one Topic per name; partitions via Publisher/Subscriber QoS."""
 
     def __init__(self, domain_id: int = 0) -> None:
-        from dataclasses import dataclass
-
         from cyclonedds.domain import DomainParticipant
-        from cyclonedds.idl import IdlStruct
-        from cyclonedds.idl.types import float64, int64
 
-        @dataclass
-        class Sample(IdlStruct, typename="saag::Sample"):
-            msg_id: int64
-            publisher: str
-            created: float64
-            size: int64
+        from ._dds_types import Sample
+
+        from cyclonedds.core import WaitSet
 
         self.Sample = Sample
         self.dp = DomainParticipant(domain_id)
         self._topics: Dict[str, Any] = {}
         self._entities = []
         self._lock = threading.Lock()
+        self._readers: list = []
+        self._waitset = WaitSet(self.dp)
+        self._stop = threading.Event()
+        self._poller = threading.Thread(target=self._poll, daemon=True, name="dds-poller")
+        self._poller.start()
 
     def _qos(self, topic: Mapping[str, Any]):
         from cyclonedds.core import Policy, Qos
@@ -113,19 +121,42 @@ class DdsTransport:
 
     def subscribe(self, topic: str, partition: str, qos: Mapping[str, Any],
                   callback: Callable[[Dict[str, Any]], None]) -> None:
-        from cyclonedds.core import Listener, Policy, Qos
+        from cyclonedds.core import InstanceState, Policy, Qos, ReadCondition, SampleState, ViewState
         from cyclonedds.sub import DataReader, Subscriber
 
-        class _L(Listener):
-            def on_data_available(self, reader):
-                for s in reader.take(N=256):
-                    callback({"msg_id": s.msg_id, "publisher": s.publisher,
-                              "created": s.created, "size": s.size})
-
         sub = Subscriber(self.dp, qos=Qos(Policy.Partition([partition])))
-        r = DataReader(sub, self._topic(topic), qos=self._qos(qos), listener=_L())
-        self._entities += [sub, r]
+        r = DataReader(sub, self._topic(topic), qos=self._qos(qos))
+        cond = ReadCondition(r, SampleState.Any | ViewState.Any | InstanceState.Any)
+        with self._lock:
+            self._readers.append((r, cond, callback))
+            self._entities += [sub, r, cond]
+        self._waitset.attach(cond)
+
+    def _poll(self) -> None:
+        from cyclonedds.sub import InvalidSample
+        from cyclonedds.util import duration
+
+        while not self._stop.is_set():
+            self._waitset.wait(duration(milliseconds=50))
+            with self._lock:
+                readers = list(self._readers)
+            for r, cond, cb in readers:
+                for s in r.take(N=256, condition=cond):
+                    # Instance-state notifications (a remote writer went away --
+                    # a host crash, or a peer shutting down) arrive as
+                    # InvalidSample with no data fields.
+                    if isinstance(s, InvalidSample):
+                        continue
+                    try:
+                        cb({"msg_id": s.msg_id, "publisher": s.publisher,
+                            "created": s.created, "size": s.size})
+                    except Exception:  # one bad callback must not deafen the host
+                        logger.exception("testbed callback failed")
 
     def close(self) -> None:
+        self._stop.set()
+        self._poller.join(timeout=2.0)
+        with self._lock:
+            self._readers.clear()
         self._entities.clear()
         self._topics.clear()

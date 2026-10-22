@@ -76,8 +76,10 @@ def plan_actions(faults: List[FaultSpec], plan: Dict[str, Any], duration_s: floa
         for f in faults:
             if f.target in hosts:
                 h = plan["hosts"][f.target]
-                expanded += [FaultSpec(c, f.mode, f.start_s, f.duration_s, f.params)
-                             for c in h["apps"] + h["brokers"]]
+                # A replicated application loses only its instance on this host.
+                names = [f"{a}@{f.target}" if len(plan["apps"][a].get("hosts", [])) > 1 else a
+                         for a in h["apps"]] + h["brokers"]
+                expanded += [FaultSpec(c, f.mode, f.start_s, f.duration_s, f.params) for c in names]
             elif f.mode == M.LINK_FLAP:
                 out.unsupported.append({**f.to_dict(), "reason": "no network in local mode"})
             else:

@@ -146,18 +146,36 @@ def _fresh(times: Sequence[float], t: float, window: float) -> bool:
     return i > 0 and t - times[i - 1] <= window
 
 
+#: Emitting shares strictly between these are not evidence for either policy.
+AMBIGUOUS_SHARE = (0.2, 0.8)
+
+
+def _median_gap(times: Sequence[float]) -> float:
+    gaps = [b - a for a, b in zip(times, times[1:]) if b > a]
+    return statistics.median(gaps) if gaps else math.inf
+
+
 def infer_trigger_policy(
     trace: TelemetryTrace, app: str, step_s: float = 0.1, periods: float = 3.0,
-    min_points: int = 10,
+    min_expected: float = 3.0,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     """Classify *app*'s trigger policy from how its output responds to stale inputs.
 
-    On a grid over the trace, each instant is put in one of three input states --
-    all inputs fresh, some stale, all stale -- and the share of instants at
-    which the app was still emitting is measured in each. A periodic source keeps
-    emitting with every input stale; ``any_of`` stops only when all are stale;
-    ``all_of`` stops as soon as one is. Returns ``(None, evidence)`` when the
-    trace never puts the app in a discriminating state.
+    Time is split into three input states -- all inputs fresh, some stale, all
+    stale -- on a grid of *step_s*. In each state the app's realised emission
+    rate is compared with its active rate (one over its median inter-emission
+    gap): ``emitting_share = emissions in state / (time in state x active rate)``.
+    A periodic source keeps emitting with every input stale; ``any_of`` stops
+    only when all are stale; ``all_of`` stops as soon as one is.
+
+    A rate, not "emitted within the last few gaps": for a slow output (a third
+    of a hertz is common when publishers share a topic) such a window outlasts
+    the stall itself and makes a stalled app look alive.
+
+    A state counts as evidence only when it was long enough to expect at least
+    *min_expected* emissions; shares strictly inside `AMBIGUOUS_SHARE` are not
+    evidence either way. Returns ``(None, evidence)`` when the trace never puts
+    the app in a discriminating state.
     """
     inputs = trace.inputs_of(app)
     outputs = trace.outputs_of(app)
@@ -167,33 +185,62 @@ def infer_trigger_policy(
         return "periodic", {"reason": "no inputs"}
     deliveries = {t: trace.times("deliver", app, t) for t in inputs}
     emits = trace.times("publish", app)
-    rate_in = {t: len(ts) / trace.duration_s for t, ts in deliveries.items()}
-    rate_out = len(emits) / trace.duration_s if trace.duration_s else 0.0
-    win_in = {t: (periods / r if r > 0 else math.inf) for t, r in rate_in.items()}
-    win_out = periods / rate_out if rate_out > 0 else math.inf
+    # Windows from the median inter-event gap, not count / run length: the
+    # latter includes the very outages being classified.
+    win_in = {t: periods * _median_gap(ts) for t, ts in deliveries.items()}
+    gap_out = _median_gap(emits)
+    if not math.isfinite(gap_out):
+        return None, {"reason": "too few emissions"}
 
-    counts = {"all_fresh": [0, 0], "some_stale": [0, 0], "all_stale": [0, 0]}
-    t = trace.start_s + max(win_in.values())
-    while t < trace.end_s:
+    # After a replica takeover the new active instance emits on freshness it
+    # tracked without recording it; skip one input window after each takeover.
+    takeovers = [e["t"] for e in trace.events
+                 if e["kind"] == "state" and e["app"] == app and e["state"] == "takeover"]
+    blind = max(win_in.values())
+    start = trace.start_s + blind
+
+    def state_at(t: float) -> Optional[str]:
+        if t < start or any(tk <= t < tk + blind for tk in takeovers):
+            return None
         fresh = sum(1 for tp in inputs if _fresh(deliveries[tp], t, win_in[tp]))
-        state = ("all_fresh" if fresh == len(inputs)
-                 else "all_stale" if fresh == 0 else "some_stale")
-        counts[state][0] += 1
-        counts[state][1] += int(_fresh(emits, t, win_out))
-        t += step_s
-    share = {k: (v[1] / v[0] if v[0] else None) for k, v in counts.items()}
-    evidence = {"points": {k: v[0] for k, v in counts.items()}, "emitting_share": share}
+        return "all_fresh" if fresh == len(inputs) else "all_stale" if fresh == 0 else "some_stale"
 
-    if counts["all_stale"][0] >= min_points:
-        if share["all_stale"] > 0.5:
+    time_in = {"all_fresh": 0.0, "some_stale": 0.0, "all_stale": 0.0}
+    t = start
+    while t < trace.end_s:
+        st = state_at(t)
+        if st is not None:
+            time_in[st] += step_s
+        t += step_s
+    emitted = {k: 0 for k in time_in}
+    for te in emits:
+        st = state_at(te)
+        if st is not None:
+            emitted[st] += 1
+    expected = {k: v / gap_out for k, v in time_in.items()}
+    share = {k: (emitted[k] / expected[k] if expected[k] >= min_expected else None)
+             for k in time_in}
+    evidence = {"seconds": {k: round(v, 3) for k, v in time_in.items()},
+                "expected_emissions": {k: round(v, 2) for k, v in expected.items()},
+                "emitting_share": share}
+
+    lo, hi = AMBIGUOUS_SHARE
+    if share["all_stale"] is not None:
+        if share["all_stale"] >= hi:
             return "periodic", evidence
-        if counts["some_stale"][0] >= min_points:
-            return ("all_of" if share["some_stale"] < 0.5 else "any_of"), evidence
+        if share["all_stale"] > lo:
+            return None, {**evidence, "reason": "ambiguous emitting share with all inputs stale"}
+        if share["some_stale"] is not None:
+            if share["some_stale"] <= lo:
+                return "all_of", evidence
+            if share["some_stale"] >= hi:
+                return "any_of", evidence
+            return None, {**evidence, "reason": "ambiguous emitting share with some inputs stale"}
         if len(inputs) == 1:
             # One input: all_of and any_of coincide; report the simpler.
             return "any_of", evidence
         return None, {**evidence, "reason": "no partial outage observed"}
-    if counts["some_stale"][0] >= min_points and share["some_stale"] < 0.5:
+    if share["some_stale"] is not None and share["some_stale"] <= lo:
         return "all_of", evidence
     return None, {**evidence, "reason": "no input outage observed"}
 

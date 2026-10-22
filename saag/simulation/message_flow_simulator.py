@@ -1350,8 +1350,13 @@ class MessageFlowSimulator:
     deployment_model : str
         ``"none"`` (default, published) or ``"stations"``: brokers become
         service stations on the data path with failover, co-located
-        applications share their host's CPU, hosts and brokers are labelled,
-        and CONNECTS_TO reachability gates delivery.
+        applications share their host's CPU, and hosts and brokers are
+        labelled.
+    network_gating : bool
+        Under ``deployment_model="stations"``, count a delivery only while
+        CONNECTS_TO still connects publisher, routing broker and subscriber,
+        so host outages and LINK_FLAP partition the network. Off by default,
+        as in FailureSimulator and FaultInjector.
     replica_aware : bool
         A host outage kills a multi-hosted component only when all its hosts
         are down (same semantics as FaultInjector / FailureSimulator).
@@ -1416,6 +1421,7 @@ class MessageFlowSimulator:
         staleness_periods: float = 3.0,
         record_events: bool = False,
         telemetry_profile: Optional[Any] = None,
+        network_gating: bool = False,
     ) -> None:
         _require_simpy()
         from .runtime.faults import DEPLOYMENT_MODELS, FaultSpec
@@ -1443,6 +1449,7 @@ class MessageFlowSimulator:
         self.staleness_periods = float(staleness_periods)
         self.record_events = record_events
         self.telemetry_profile = telemetry_profile
+        self.network_gating = network_gating
         #: Paired-baseline copies keep the runtime path even with no faults, so
         #: both runs consume their RNG streams identically.
         self._force_runtime = False
@@ -2354,7 +2361,7 @@ class MessageFlowSimulator:
         defaults = {"behavior_model": "open_loop", "rng_streams": "shared",
                     "estimator": "windows", "deployment_model": "none",
                     "replica_aware": False, "hot_standby": False,
-                    "workload_model": "declared"}
+                    "workload_model": "declared", "network_gating": False}
         out = {k: getattr(self, k) for k, v in defaults.items() if getattr(self, k) != v}
         if self.faults:
             out["faults"] = [f.to_dict() for f in self.faults]

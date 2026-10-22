@@ -37,6 +37,10 @@ from saag.validation.fidelity import (  # noqa: E402
 
 logging.disable(logging.WARNING)
 
+# The stub applications run on threads; an exception there must fail the test
+# rather than surface as a warning (that is how a startup race once hid).
+pytestmark = pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
+
 
 def scenario(tmp_path, brokers=True):
     """S (sensor, 20 Hz) -> t1 -> P (processor) -> t2 -> K (actuator), on two hosts."""
@@ -192,6 +196,45 @@ def test_calibrate_and_resimulate(local_run):
     assert rep["calibrated"] is True
 
 
+def test_replicated_app_survives_its_host_via_standby(tmp_path):
+    """P runs on H1 and H2: losing H1 moves P to its H2 standby, K stays fed."""
+    path = scenario(tmp_path, brokers=False)
+    data = json.loads(path.read_text())
+    data["relationships"]["runs_on"].append({"from": "P", "to": "H1"})
+    path.write_text(json.dumps(data))
+    plan = build_deployment(path)
+    assert plan["apps"]["P"]["hosts"] == ["H1", "H2"]
+    assert "P" in plan["hosts"]["H1"]["apps"] and "P" in plan["hosts"]["H2"]["apps"]
+    cp = plan_actions([FaultSpec("H1", "crash", 3.0)], plan, 6.0, local=True)
+    assert sorted(a.target for a in cp.actions) == ["P@H1", "S"]
+
+    d = orchestrate.build(path, tmp_path / "tb", duration_s=6.0)
+    # Crash only P's H1 instance (S stays up), so the takeover is all that is tested.
+    orchestrate.run(d, 6.0, [FaultSpec("P@H1", "crash", 3.0)], mode="local")
+    from saag.testbed.collect import load_run
+    trace = load_run(d)
+    k = trace.times("deliver", "K")
+    before = sum(1 for t in k if 1.0 <= t < 3.0)
+    after = sum(1 for t in k if 4.5 <= t < 6.0)
+    assert before > 20 and after > 0.5 * before * (1.5 / 2.0)
+    # P's emissions never double: one active instance at a time.
+    p = trace.times("publish", "P")
+    assert sum(1 for t in p if 1.0 <= t < 3.0) <= 2.0 * 20 * 1.2
+    # The standby's takeover is visible in the trace (policy inference skips it).
+    takeovers = [e for e in trace.events if e["kind"] == "state" and e["app"] == "P"]
+    assert takeovers and all(3.0 <= e["t"] < 5.0 for e in takeovers)
+
+
+def test_telemetry_survives_a_hard_kill(tmp_path):
+    """Records reach the file as written: `docker kill` must not empty a host's log."""
+    from saag.testbed.runtime import TelemetrySink
+    sink = TelemetrySink(tmp_path / "h.jsonl")
+    sink.emit(make_event(1.0, "saag.publish", "A", "t"))
+    # Not closed -- as after SIGKILL -- yet already readable.
+    assert len((tmp_path / "h.jsonl").read_text().splitlines()) == 1
+    sink.close()
+
+
 # ── Calibrator round trip on a simulated trace ───────────────────────────────
 
 def chain_graph(trigger="all_of", f=20):
@@ -240,6 +283,26 @@ def test_policy_inference_identifies_the_trigger(trigger):
     policy, evidence = infer_trigger_policy(trace, "F")
     assert policy == trigger, evidence
     assert infer_trigger_policy(trace, "S1")[0] == "periodic"
+
+
+def test_policy_inference_on_a_slow_shared_output():
+    """F shares its output with two other publishers, so it emits at a third of
+    the rate. A "still emitting within the last few gaps" test outlasts the
+    stall itself and calls an all_of app any_of; the rate-based share does not."""
+    # 1 Hz topics, three publishers on F's output: F emits at 1/3 Hz, the regime
+    # of the corpus's tiny_system where the old estimator answered "periodic".
+    g = chain_graph("all_of", f=1)
+    for extra in ("X1", "X2"):
+        g.add_node(extra, type="Application", app_type="sensor")
+        g.add_edge(extra, "tout", type="PUBLISHES_TO")
+    faults = [FaultSpec("S1", "transient_crash", 20.0, 20.0),
+              FaultSpec("S1", "transient_crash", 60.0, 20.0),
+              FaultSpec("S2", "transient_crash", 60.0, 20.0)]
+    res = MessageFlowSimulator(g, duration=100.0, seed=5, faults=faults, behavior_model="reactive",
+                               rng_streams="per_process", record_events=True).run()
+    trace = TelemetryTrace.from_records(res.events, start_s=0.0, end_s=100.0)
+    policy, evidence = infer_trigger_policy(trace, "F")
+    assert policy == "all_of", evidence
 
 
 def test_policy_not_inferred_without_an_outage():

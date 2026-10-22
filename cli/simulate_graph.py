@@ -358,6 +358,7 @@ def _runtime_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
         "failover_delay_s": getattr(args, "failover_delay", 1.0),
         "workload_model": getattr(args, "workload_model", "declared"),
         "staleness_periods": getattr(args, "staleness_periods", 3.0),
+        "network_gating": getattr(args, "network_gating", False),
     }
 
 
@@ -796,6 +797,9 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="'mmpp': bursty arrivals with the declared mean rate.")
         p.add_argument("--staleness-periods", type=float, default=3.0, metavar="K",
                        help="Reactive model: input freshness window in periods.  Default: 3")
+        p.add_argument("--network-gating", action="store_true",
+                       help="With --deployment-model stations: CONNECTS_TO reachability "
+                            "gates delivery (host outages and link_flap partition).")
 
     def _add_network_gating(p: argparse.ArgumentParser) -> None:
         p.add_argument(

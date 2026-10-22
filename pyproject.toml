@@ -19,7 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 neo4j = ["neo4j==5.25.0"]
 sim   = ["simpy==4.1.1"]
-testbed = ["saag[sim]", "cyclonedds==0.10.5"]
+testbed = ["saag[sim]", "cyclonedds==11.0.1"]
 gnn   = [
     "torch==2.5.0",
     "torch-geometric==2.7.0",

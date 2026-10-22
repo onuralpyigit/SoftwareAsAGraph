@@ -373,6 +373,7 @@ Runtime-engine flags ([failure-simulation.md §7.11](failure-simulation.md#711-r
 | `--hot-standby` / `--failover-delay` | off / `1.0` | `hotstandby` components return after the delay |
 | `--workload-model` | `declared` | `mmpp`: bursty arrivals, same mean rate |
 | `--staleness-periods` | `3.0` | Reactive input-freshness window, in periods |
+| `--network-gating` | off | With `stations`: CONNECTS_TO reachability gates delivery |
 | `--fault-mode` | `crash` | Runtime fault mode for `--fault-node` (`transient_crash`, `freeze`, `slowdown`, `omission`, `babbling`, `buffer_leak`, `redelivery_storm`, `link_flap`) |
 | `--fault-duration` | `None` | Duration of a bounded fault |
 | `--fault-param KEY=VALUE` | — | Fault parameter (repeatable), e.g. `k=4`, `p=0.5` |

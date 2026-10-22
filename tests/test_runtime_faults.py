@@ -168,7 +168,8 @@ def test_link_flap_drops_cross_host_traffic():
     """Brokerless, so A's samples cross the H1-H2 link directly."""
     g = system(brokers=(), hosts_a=("H1",), hosts_b=("H2",), hosts_c=("H2",),
                links=[("H1", "H2")])
-    flap = run(g, [crash("H1|H2", mode="link_flap", mean_good_s=1.0, mean_bad_s=1.0)])
+    flap = run(g, [crash("H1|H2", mode="link_flap", mean_good_s=1.0, mean_bad_s=1.0)],
+               network_gating=True)
     b = flap.subscriber_stats["B"]
     assert b.received_post_fault < 0.8 * b.received_pre_fault
     # C is co-located with B: the link never carries its feed.
@@ -181,9 +182,11 @@ def test_host_crash_partitions_over_the_network():
     """A brokerless path through H1 is cut when H1 goes down, killing nothing else."""
     g = system(brokers=(), hosts_a=("H3",), hosts_b=("H2",), hosts_c=("H2",),
                links=[("H3", "H1"), ("H1", "H2")])
-    r = run(g, [crash("H1")])
+    r = run(g, [crash("H1")], network_gating=True)
     assert post(r, "B") == 0
     assert "A" not in r.fault_event.cascade_silenced_publishers
+    # Without gating CONNECTS_TO is not the only way between hosts.
+    assert post(run(g, [crash("H1")]), "B") > 150
 
 
 def test_hot_standby_takes_over():

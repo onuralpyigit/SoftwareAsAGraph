@@ -80,6 +80,8 @@ def build_deployment(
                                    for t in out},
             "phase_index": {t: topics[t]["publishers"].index(a) for t in out},
             "hotstandby": bool(g.nodes[a].get("hotstandby")),
+            # Every host it RUNS_ON: one instance each, lowest-id live one active.
+            "hosts": sorted(hosts_of.get(a, [])) or [DEFAULT_HOST],
         }
 
     brokers: Dict[str, Any] = {}
@@ -90,8 +92,12 @@ def build_deployment(
                       "service_mean_s": (target_utilization / load) if load > 0 else 0.0}
 
     hosts: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: {"apps": [], "brokers": []})
+    # A multi-hosted application runs an instance on every host (active /
+    # standby, see runtime.AppRuntime), so a host outage takes it down only when
+    # all of its hosts are down -- `replica_aware` semantics. Brokers stay on
+    # their first host: their redundancy is the router set of each topic.
     for a in apps:
-        for h in (sorted(hosts_of.get(a, [])) or [DEFAULT_HOST])[:1]:
+        for h in apps[a]["hosts"]:
             hosts[h]["apps"].append(a)
     for b in brokers:
         for h in (sorted(hosts_of.get(b, [])) or [DEFAULT_HOST])[:1]:

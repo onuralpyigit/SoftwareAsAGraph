@@ -1142,7 +1142,8 @@ The runtime engine, in [`saag/simulation/runtime/`](../saag/simulation/runtime/)
 | `behavior_model="reactive"` | `open_loop` | Publication is gated on input freshness by a per-application trigger policy: `periodic`, `all_of`, `any_of` or `k_of_n:K` (degraded emission). The policy comes from the `trigger` attribute, or by default from `app_type`: sensor → periodic; processor/controller → all_of; gateway, service, monitor and actuator → any_of. An input is fresh while its last *delivered* sample (one that met its deadline) is younger than $\max(\text{deadline}, 3/f_t)$. Topics nobody publishes and self-published topics are never required inputs. A fault now stalls downstream relays; the record reports `stalled_apps`, `time_to_stall_s` and `cascade_hops`. |
 | `rng_streams="per_process"` | `shared` | One RNG stream per publisher/subscriber process (common random numbers). |
 | `estimator="paired"` | `windows` | Adds a no-fault baseline on the same streams and windows, cached per `(seed, fault_time)`. It reports `i_dyn_paired` = baseline-post − fault-post delivery. With per-process streams, a fault that touches nothing scores exactly 0.0. |
-| `deployment_model="stations"` | `none` | Brokers become service stations on ROUTES. On a broker outage, traffic fails over to the lowest-id live broker after a $\max(1, 3/f)$ s lease. Co-located applications share their host's CPU (`cpu_cores`, default one core per resident). Host outages kill residents (`replica_aware` respected), and CONNECTS_TO reachability gates delivery. Brokers and hosts become labelled. |
+| `deployment_model="stations"` | `none` | Brokers become service stations on ROUTES. On a broker outage, traffic fails over to the lowest-id live broker after a $\max(1, 3/f)$ s lease. Co-located applications share their host's CPU (`cpu_cores`, default one core per resident). Host outages kill residents (`replica_aware` respected). Brokers and hosts become labelled. |
+| `network_gating=True` | off | With `stations`, CONNECTS_TO reachability gates delivery, so host outages and `link_flap` partition the network. Off by default, as in `FailureSimulator` and `FaultInjector`: the corpus's CONNECTS_TO is a sparse host mesh, not a complete topology. |
 | `hot_standby=True` | off | Components declaring `hotstandby` come back `failover_delay_s` after a crash. |
 | `faults=[FaultSpec, …]` | — | The fault library below; the first entry is the reported fault. |
 | `workload_model="mmpp"` | `declared` | Two-state Markov-modulated Poisson arrivals with the declared mean rate (`burst_ratio`, `burst_fraction`, `mean_burst_s`). No corpus topic declares bursts today. `runtime.workload.apply_zipf_rates` is a sensitivity arm for the three flat-rate scenarios. |
@@ -1195,10 +1196,10 @@ A check of the identity: with `behavior_model="open_loop"`, paired `i_delivery` 
 Every oracle above is scored against something the framework computes. [`saag/testbed/`](../saag/testbed/) produces *observed* behaviour to compare against: the scenario runs as a real pub-sub system, and the same `FaultSpec`s are injected into it.
 
 - **Deployment plan** ([`testbed/deployment.py`](../saag/testbed/deployment.py)). Records hosts and their residents, each topic's DDS QoS, and each application's trigger policy, required inputs, staleness windows and calibrated service time. The policy and staleness functions are the same ones the reactive model uses, so a fidelity gap reflects timing, queueing and transport, not the behavioural model.
-- **Runtime** ([`testbed/runtime.py`](../saag/testbed/runtime.py)). Stub applications run one publisher thread per output, one worker per application (the shared station), bounded per-topic queues with the corpus overflow policy, and deadline checks. A **Broker** is a relay process: writers publish to an `ingress` partition and the routing broker republishes to `egress`. The relay with the lowest id and a live heartbeat routes.
-- **Transport.** [`testbed/dds.py`](../saag/testbed/dds.py) uses Cyclone DDS (extra `testbed`) and maps reliability, durability, KEEP_LAST depth, deadline and transport priority. `LocalTransport` runs the whole scenario in-process without containers.
+- **Runtime** ([`testbed/runtime.py`](../saag/testbed/runtime.py)). Stub applications run one publisher thread per output, one worker per application (the shared station), bounded per-topic queues with the corpus overflow policy, and deadline checks. A **Broker** is a relay process: writers publish to an `ingress` partition and the routing broker republishes to `egress`. The relay with the lowest id and a live heartbeat routes. A **multi-hosted application** runs one instance per host. The lowest-id instance with a live heartbeat is active; the others are warm standbys that track input freshness. A host outage therefore moves the application rather than killing it, which is why the fidelity comparison simulates with `replica_aware=True`. Each takeover is logged as a `saag.state` event. Telemetry is line-buffered, so a `docker kill` does not lose a host's log.
+- **Transport.** [`testbed/dds.py`](../saag/testbed/dds.py) uses Cyclone DDS (extra `testbed`) and maps reliability, durability, KEEP_LAST depth, deadline and transport priority. Samples are taken by one Python poller blocked on a WaitSet, never by listener callbacks: a listener runs Python on Cyclone's receive thread while that thread holds the reader lock, and with every component writing and reading the heartbeat topic in one participant, that deadlocked whole hosts. Instance-state notifications (`InvalidSample`, for example when a remote writer dies) are skipped. `LocalTransport` runs the whole scenario in-process without containers.
 - **Chaos** ([`testbed/chaos.py`](../saag/testbed/chaos.py)). Host faults become `docker kill/start/pause/update`. Application faults become control files the agent polls. `link_flap` becomes `tc netem`, an approximation that cuts all of one endpoint's traffic. `buffer_leak` and `redelivery_storm` are reported as unsupported.
-- **Calibration** ([`saag/simulation/calibration.py`](../saag/simulation/calibration.py)). `TelemetryCalibrator` fits topic rates and per-application service-time distributions on the pre-fault steady state. It infers trigger policies from how emissions respond to input outages, and leaves a policy unset when the trace never shows one. It never writes `edge_failure_correlation` (a cascade *probability* in `FailureSimulator`, not a drop rate) or starvation bounds.
+- **Calibration** ([`saag/simulation/calibration.py`](../saag/simulation/calibration.py)). `TelemetryCalibrator` fits topic rates and per-application service-time distributions on the pre-fault steady state. It infers trigger policies from the app's realised emission rate in each input state (all fresh / some stale / all stale), relative to its active rate. The windows come from median inter-event gaps, and one window after each replica takeover is skipped. The policy is left unset when the trace never shows a discriminating outage, or when the share is ambiguous (between 0.2 and 0.8). It never writes `edge_failure_correlation` (a cascade *probability* in `FailureSimulator`, not a drop rate) or starvation bounds.
 - **Fidelity** ([`saag/validation/fidelity.py`](../saag/validation/fidelity.py)). Compares steady state (topic rate, per-reader delivery rate, p50/p95 latency, deadline-miss share against declared tolerances) and fault response (impact rank agreement, stall-set Jaccard). It is a Tier-2 report, never a gate.
 
 ```bash
@@ -1208,7 +1209,26 @@ saag-simulate testbed calibrate --output output/testbed/atm
 saag-simulate testbed fidelity --output output/testbed/atm --calibrated
 ```
 
-`--mode local` needs nothing beyond the Python environment. `--mode docker` builds an image that downloads `python:3.11-slim` and `cyclonedds==0.10.5`, and runs one container per host with `NET_ADMIN`. **The Docker/DDS path has not been exercised yet**; only the in-process path is covered by tests (`tests/test_testbed.py`; the DDS round trip is marked `testbed`).
+`--mode local` needs nothing beyond the Python environment. `--mode docker` builds an image that downloads `python:3.11-slim` and `cyclonedds==11.0.1`, and runs one container per host with `NET_ADMIN`. The testbed directory is its own build context: `build` copies the `saag` package into it, so the repository is never shipped to the Docker daemon. (0.10.x ships no wheels and needs the Cyclone C library to build.) The simulator side of the fidelity comparison uses the default `network_gating=False`, matching the testbed's single bridge network.
+
+**Docker validation on `tiny_system`** (2026-10-23; 4 containers, 12 applications, 2 broker relays, 1 Hz topics; declared parameters):
+
+| Run | Topic rate (median rel. err.) | Per-reader delivery (median) | Latency p50 / p95 (median) | Stall-set Jaccard |
+|:---|:---|:---|:---|:---|
+| Fault-free, 40 s | 0.000 | 0.000 | 0.14 / 0.11 | — |
+| Host N1 crash at 20 s (`docker kill`), 50 s | 0.000 | 0.059 | 0.40 / 0.14 | 1.0 |
+| Broker B0 crash at 20 s (failover to B1), 50 s | 0.000 | 0.059 | 0.34 / 0.18 | 1.0 |
+
+Calibration reproduces the stall sets and trims p50 latency error by 0.04–0.05. It has not yet been shown to help on p95 (0.13–0.29). Inferred policies agree with the declared ones wherever they are identifiable; the rest abstain. Latency is the weakest match: p50 meets its 25% tolerance on only 1–3 of 5 topics in the faulted runs. With 1 Hz topics, each 20 s window holds only about 20 samples per topic. The numbers come from single runs and are a smoke test of the loop, not an evaluation.
+
+The first Docker runs found four defects that the in-process tests could not:
+
+1. Multi-hosted components were placed only on their first host.
+2. Telemetry was lost on `docker kill`.
+3. The listener deadlock in the transport.
+4. Runtime network gating was on by default, which partitioned hosts the sparse corpus mesh never meant to isolate.
+
+Each now has a regression test, or is pinned by the Docker results above.
 
 ---
 

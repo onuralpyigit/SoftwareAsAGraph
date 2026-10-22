@@ -9,6 +9,12 @@ trigger policy deciding whether an emission goes out. `BrokerRelay` forwards a
 broker's routed topics from the ingress to the egress partition, with
 lowest-id-live-broker failover on heartbeats.
 
+An application that RUNS_ON several hosts has one `AppRuntime` per host. The
+lowest-id instance with a live heartbeat is active; the others are warm
+standbys that track input freshness but neither serve nor emit, so a host
+outage moves the application rather than killing it (the simulator's
+``replica_aware`` semantics, plus a `REPLICA_LEASE_S` takeover delay).
+
 Both obey a `Control` record (crash / freeze / slowdown / omission / babbling),
 which the agent refreshes from a control file so `saag.testbed.chaos` can drive
 application-level faults inside a container.
@@ -36,6 +42,7 @@ INGRESS, EGRESS, DIRECT = "ingress", "egress", "direct"
 HEARTBEAT_TOPIC = "saag_broker_heartbeat"
 HEARTBEAT_PERIOD_S = 0.2
 BROKER_LEASE_S = 1.0
+REPLICA_LEASE_S = 1.0
 DEFAULT_QUEUE = 100
 
 
@@ -78,7 +85,10 @@ class TelemetrySink:
         self.path = Path(path) if path else None
         self.records: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
-        self._fh = open(self.path, "a") if self.path else None
+        # Line-buffered: each record reaches the OS as it is written, so the log
+        # survives the SIGKILL that `docker kill` (a host crash) delivers. With
+        # block buffering a crashed host's file came back empty.
+        self._fh = open(self.path, "a", buffering=1) if self.path else None
 
     def emit(self, record: Dict[str, Any]) -> None:
         with self._lock:
@@ -151,15 +161,23 @@ class AppRuntime:
     """One stub application (see module docstring)."""
 
     def __init__(self, app: str, plan: Mapping[str, Any], transport: Transport,
-                 sink: TelemetrySink, seed: int = 0, clock: Callable[[], float] = time.time) -> None:
+                 sink: TelemetrySink, seed: int = 0, clock: Callable[[], float] = time.time,
+                 host: Optional[str] = None) -> None:
         self.app = app
         self.spec = plan["apps"][app]
+        self.replicas: List[str] = list(self.spec.get("hosts") or [])
+        self._was_active: Optional[bool] = None
+        self.host = host if host is not None else (self.replicas[0] if self.replicas else None)
+        self.heard: Dict[str, float] = {}
         self.topics = plan["topics"]
         self.transport = transport
         self.sink = sink
         self.clock = clock
         self.control = Control()
         self.stop = threading.Event()
+        # Set here, not only in start(): another component's samples (or
+        # heartbeats) can arrive before this one is started.
+        self._t0 = clock()
         self.rng = random.Random(derive_seed(seed, f"testbed|{app}"))
         self._rng_lock = threading.Lock()
         self.last_fresh: Dict[str, float] = {}
@@ -175,6 +193,49 @@ class AppRuntime:
         for t in self.spec["subscribes"]:
             transport.subscribe(t, topic_partitions(self.topics[t])[1], self.topics[t],
                                 lambda s, t=t: self._on_sample(t, s))
+        if len(self.replicas) > 1:
+            self._hb = transport.writer(HEARTBEAT_TOPIC, DIRECT, {"reliability": "BEST_EFFORT"})
+            transport.subscribe(HEARTBEAT_TOPIC, DIRECT, {"reliability": "BEST_EFFORT"},
+                                self._on_heartbeat)
+
+    @property
+    def instance(self) -> str:
+        return f"{self.app}@{self.host}"
+
+    def active(self, now: float) -> bool:
+        """Single-hosted: always. Replicated: lowest-id host whose instance is live."""
+        if len(self.replicas) <= 1:
+            return True
+        for h in self.replicas:
+            if h == self.host:
+                return not (self.control.crashed or self.control.frozen)
+            if now - self.heard.get(h, self._t0) <= REPLICA_LEASE_S:
+                return False
+        return False
+
+    def _check_active(self, now: float) -> bool:
+        """`active`, logging a takeover when a standby becomes the active instance.
+
+        A warm standby tracks input freshness from receipts it never records,
+        so right after a takeover the trace shows emissions with no logged
+        inputs; the ``takeover`` state event lets a reader of the trace (the
+        trigger-policy inference) discount that window.
+        """
+        act = self.active(now)
+        if act and self._was_active is False:
+            self.sink.emit(make_event(now, "saag.state", self.app, state="takeover", host=self.host))
+        self._was_active = act
+        return act
+
+    def _on_heartbeat(self, sample: Dict[str, Any]) -> None:
+        app, _, host = str(sample["publisher"]).partition("@")
+        if app == self.app and host != self.host:
+            self.heard[host] = self.clock()
+
+    def _heartbeat(self) -> None:
+        while not self.stop.wait(HEARTBEAT_PERIOD_S):
+            if not self.control.crashed and not self.control.frozen:
+                self._hb({"msg_id": 0, "publisher": self.instance, "created": self.clock(), "size": 0})
 
     # ── Policy ──────────────────────────────────────────────────────────────
 
@@ -201,6 +262,8 @@ class AppRuntime:
             self._threads.append(th)
         if self.spec["subscribes"]:
             self._threads.append(threading.Thread(target=self._worker, daemon=True, name=f"{self.app}:worker"))
+        if len(self.replicas) > 1:
+            self._threads.append(threading.Thread(target=self._heartbeat, daemon=True))
         for th in self._threads:
             th.start()
 
@@ -229,6 +292,8 @@ class AppRuntime:
             c = self.control
             if c.crashed or c.frozen:
                 continue
+            if not self._check_active(now):
+                continue
             if c.omission and self._rand() < c.omission:
                 continue
             share = self.emit_share(now)
@@ -249,9 +314,15 @@ class AppRuntime:
     def _on_sample(self, topic: str, sample: Dict[str, Any]) -> None:
         if self.control.crashed:
             return
+        now = self.clock()
+        if not self.active(now):
+            # Warm standby: keep input freshness current so a takeover does not
+            # start stalled, but serve and record nothing.
+            self.last_fresh[topic] = now
+            return
         dropped = self.station.put(topic, sample)
         if dropped is not None:
-            self.sink.emit(make_event(self.clock(), "saag.drop", self.app, topic,
+            self.sink.emit(make_event(now, "saag.drop", self.app, topic,
                                       publisher=dropped.get("publisher")))
 
     def _worker(self) -> None:
@@ -298,6 +369,9 @@ class BrokerRelay:
         self.clock = clock
         self.control = Control()
         self.stop = threading.Event()
+        # Set here, not only in start(): another component's samples (or
+        # heartbeats) can arrive before this one is started.
+        self._t0 = clock()
         self.rng = random.Random(derive_seed(seed, f"testbed|{broker}"))
         self.heard: Dict[str, float] = {}
         self._threads: List[threading.Thread] = []

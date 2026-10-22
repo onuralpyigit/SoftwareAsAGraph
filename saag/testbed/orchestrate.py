@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 import subprocess
 import threading
 import time
@@ -29,7 +28,6 @@ from .collect import load_run
 from .compose import write_testbed
 from .deployment import build_deployment
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def build(scenario: Path, out_dir: Path, duration_s: float, seed: int = 0,
@@ -73,16 +71,15 @@ def run(out_dir: Path, duration_s: float, faults: Optional[List[FaultSpec]] = No
         log = execute(chaos, out_dir / "control", start)
         th.join()
     elif mode == "docker":
-        env = {**os.environ, "SAAG_ROOT": str(REPO_ROOT), "SAAG_TESTBED": str(out_dir.resolve())}
         compose = ["docker", "compose", "-f", str(out_dir / "docker-compose.yml")]
-        subprocess.run(compose + ["up", "--build", "-d"], check=True, env=env)
+        subprocess.run(compose + ["up", "--build", "-d"], check=True)
         try:
             log = execute(chaos, out_dir / "control", start)
             remaining = start + duration_s + 2.0 - time.time()
             if remaining > 0:
                 time.sleep(remaining)
         finally:
-            subprocess.run(compose + ["down"], env=env)
+            subprocess.run(compose + ["down"])
     else:
         raise ValueError(f"mode must be 'local' or 'docker', got {mode!r}")
     meta = json.loads((out_dir / "run.json").read_text())
@@ -136,8 +133,11 @@ def simulate_like(out_dir: Path, settings: Optional[Dict[str, Any]] = None,
     if calibrated:
         profile = profile_from_json(json.loads((out_dir / "profile.json").read_text()))
     faults = [FaultSpec.from_dict(f) for f in meta["faults"]] or None
+    # replica_aware: the testbed runs an instance of a multi-hosted component on
+    # every host, so a host outage moves it rather than killing it.
     kw = {"behavior_model": "reactive", "deployment_model": "stations",
-          "rng_streams": "per_process", "target_utilization": plan["target_utilization"],
+          "rng_streams": "per_process", "replica_aware": True,
+          "target_utilization": plan["target_utilization"],
           "staleness_periods": plan["staleness_periods"], **(settings or {})}
     res = MessageFlowSimulator(g, duration=meta["duration_s"], seed=meta["seed"], faults=faults,
                                record_events=True, telemetry_profile=profile, **kw).run()
