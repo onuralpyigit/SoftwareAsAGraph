@@ -1,5 +1,5 @@
 """
-Percentile helpers shared across the simulation package.
+Percentile and seed helpers shared across the simulation package.
 
 Two estimators are in use and they are *not* interchangeable:
 
@@ -15,7 +15,21 @@ call sites on the estimator they already use — switching one silently shifts
 every reported latency number.
 """
 
+import zlib
 from typing import List, Optional, Sequence
+
+
+def derive_seed(run_seed: Optional[int], key: str) -> Optional[int]:
+    """Derive a per-component (or per-process) seed from a run-level seed.
+
+    Uses zlib.crc32 rather than hash() because hash() on str is salted by
+    PYTHONHASHSEED, which would make labels differ across processes.
+    Deriving from a stable id (not an index) keeps one stream independent of
+    how many other streams share the run.
+    """
+    if run_seed is None:
+        return None
+    return (run_seed ^ zlib.crc32(key.encode("utf-8"))) & 0x7FFFFFFF
 
 
 def percentile(values: Sequence[float], q: float) -> Optional[float]:

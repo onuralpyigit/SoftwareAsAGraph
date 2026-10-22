@@ -187,6 +187,9 @@ Computes structural metrics only on the layer subgraph. No RM/Q scores or anti-p
 
 > **Generation lives in `tools/generation/`.** `cli/generate_graph.py` delegates there rather than implementing topology synthesis itself. `saag/core/graph_generator.py` used to be a re-export stub pointing at a `src.` package that no longer exists and that nothing imported; it has been removed, as have `saag/core/file_exporter.py` and `saag/core/ports/file_store.py`. `saag/adapters/` is the real-world topology importer, and its persistence re-exports have been replaced by direct imports from `saag/infrastructure/`.
 
+### `testbed/` — Emulated DDS Testbed (opt-in)
+Runs a scenario as a real pub-sub system (Docker + Cyclone DDS, or in-process) with the same `FaultSpec`s as the simulator, and records OpenTelemetry-shaped traces for `simulation.calibration` and `validation.fidelity`. Depends on `simulation`, never the reverse; `cyclonedds` (extra `testbed`) is imported only by the DDS transport. See [docs/failure-simulation.md §7.12](docs/failure-simulation.md#712-emulated-dds-testbed-calibration--fidelity-opt-in).
+
 ### `simulation/` — Step 5 Simulation Engine
 A discrete-event and BFS cascade failure simulation suite evaluating propagation boundaries on raw structural edges ($G_{\text{structural}}$), operating as offline supervisors evaluated under the **Order-$k$ Reference Criterion**:
 - `SimulationGraph` — Wraps the structural topology projection for traversal operations.
@@ -199,6 +202,8 @@ A discrete-event and BFS cascade failure simulation suite evaluating propagation
 - `CompromisePropagationSimulator` — Propagates cyber-breach scenarios along trust-weighted dependency paths.
 - `ComplexityProcessor` — Converts component complexity into processing-latency estimates for flow simulation.
 - `SimulationService` — Orchestrates simulation runs for pipeline and CLI consumers.
+- `runtime/` — **Opt-in runtime engine for `MessageFlowSimulator`**: reactive trigger policies (`behavior`), the fault library and deployment-on-the-data-path controller (`faults`), bursty workloads (`workload`), parameter uncertainty (`uncertainty`) and the runtime label sweep with its order-k references (`labels`). Defaults reproduce the published engine bit for bit (`tests/test_simulation_golden_defaults.py`). See [docs/failure-simulation.md §7.11](docs/failure-simulation.md#711-runtime-engine-reactive-behaviour-deployment--gray-failures-opt-in).
+- `calibration` — Telemetry trace format and `TelemetryCalibrator` (observed trace → `RuntimeTelemetryProfile`).
 
 > **`FaultInjector` and `FailureSimulator` both emit a quantity called "impact", and the two are not interchangeable.** Each owns its canonical role — labels vs. validation oracle — and mixing them within a stage is a correctness error, enforced by `tests/test_groundtruth_contract.py`. See [docs/failure-simulation.md §2.1](docs/failure-simulation.md#2-the-five-simulation-engines-at-a-glance).
 
@@ -207,6 +212,7 @@ A discrete-event and BFS cascade failure simulation suite evaluating propagation
 Correlates predictions against simulation ground-truth metrics to verify thesis validation gates.
 - `Validator` — Evaluates prediction output arrays against ground truth using Spearman $\rho$, Kendall $\tau$, F1, Precision, and Recall.
 - `ValidationService` — Evaluates the nine-gate tier system (see [README §Validation Gates](README.md#validation-gates)) and computes system health indices (SRI, RCI).
+- `fidelity` — Simulated-vs-observed comparison (steady state against declared tolerances; fault-response rank and stall-set agreement) for testbed or production traces. A Tier-2 report, never a gate.
 
 ### `prescription/` — Step 7 Prescriptive Engine
 Generates rule-based architectural optimization policies (logical splitting, host anti-affinity container reallocations, and transport contract QoS upgrades) and validates resilience improvements in-memory, accepting only edits whose counterfactual impact reduction beats the simulator's seed noise at every propagation threshold. See [docs/prescription.md](docs/prescription.md).

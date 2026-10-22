@@ -45,7 +45,9 @@ FIXES IN THIS VERSION
 
 from __future__ import annotations
 
+import copy
 import logging
+import math
 import random
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -67,7 +69,8 @@ def _require_simpy() -> None:
 
 import networkx as nx
 
-from ._stats import percentile
+from ._stats import derive_seed, percentile
+from .calibration import make_event
 
 from saag.core.models import QoSPolicy
 
@@ -219,6 +222,30 @@ SERVICE_DISTRIBUTIONS: Tuple[str, ...] = ("exponential", "uniform", "determinist
 #:            Messages carry the topic's declared size.
 PAYLOAD_MODELS: Tuple[str, ...] = ("fixed", "size")
 
+#: When an application publishes (see saag/simulation/runtime/behavior.py).
+#:
+#: ``open_loop``  every publisher emits on its schedule whatever it receives --
+#:                the historical engine and the published I_dyn oracle. A fault
+#:                cannot travel more than one hop.
+#: ``reactive``   publication is gated on input freshness by a per-application
+#:                trigger policy, so a lost feed stalls downstream relays and the
+#:                fault propagates.
+BEHAVIOR_MODELS: Tuple[str, ...] = ("open_loop", "reactive")
+
+#: ``shared``       one RNG for the whole run (historical). Removing a process
+#:                  shifts every later draw, so two runs never share sample paths.
+#: ``per_process``  one stream per publisher / subscriber process, seeded from
+#:                  (seed, process id). Untouched processes draw identically
+#:                  with and without a fault -- common random numbers.
+RNG_STREAMS: Tuple[str, ...] = ("shared", "per_process")
+
+#: ``windows``  I_dyn = pre-fault minus post-fault delivery within one run.
+#: ``paired``   additionally runs the same system without the fault, on the same
+#:              streams, and reports baseline-post minus fault-post as
+#:              ``FaultEventRecord.i_dyn_paired``. With ``per_process`` streams a
+#:              fault that touches nothing scores exactly 0.0.
+ESTIMATORS: Tuple[str, ...] = ("windows", "paired")
+
 #: Payload a message is counted as when the topic declares none (and under
 #: ``fixed``, for every message).
 DEFAULT_PAYLOAD_BYTES: int = 64
@@ -341,6 +368,10 @@ class ServiceStation:
         #: Per-topic multiplier on the mean service time (``payload_model="size"``).
         #: Empty means every topic costs the same.
         self.topic_scale: Dict[str, float] = {}
+        #: Service-time multiplier set by a SLOWDOWN fault (runtime/faults.py).
+        self.slowdown = 1.0
+        #: Coefficient of variation, used only by the measured "lognormal" family.
+        self.cv = 1.0
 
     def scale_for(self, topic_id: str) -> float:
         return self.topic_scale.get(topic_id, 1.0)
@@ -357,11 +388,15 @@ class ServiceStation:
         ``scale`` multiplies the mean (the message's payload weight under
         ``payload_model="size"``); at 1.0 the draw is unchanged bit for bit.
         """
-        mean = self.service_time_s * scale
+        mean = self.service_time_s * scale * self.slowdown
         if mean <= 0.0:
             return 0.0
         if self.distribution == "exponential":
             return rng.expovariate(1.0 / mean)
+        if self.distribution == "lognormal":
+            # Only reached through a measured profile (TelemetryCalibrator).
+            sigma = math.sqrt(math.log(1.0 + self.cv * self.cv))
+            return rng.lognormvariate(math.log(mean) - sigma * sigma / 2.0, sigma)
         if self.distribution == "uniform":
             return mean * (0.8 + 0.4 * rng.random())
         return mean
@@ -513,6 +548,8 @@ class SubscriberQueue:
         #: clock the publisher and subscriber use.
         self.bucket_of = bucket_of
         self._store: simpy.Store = simpy.Store(env, capacity=qos.queue_size)
+        #: Effective capacity below the declared one, set by a BUFFER_LEAK fault.
+        self.capacity_override: Optional[int] = None
 
         # Saturation tracking: depth integral and peak occupancy
         self._last_depth_change_time = 0.0
@@ -571,6 +608,10 @@ class SubscriberQueue:
         return self._store.get()
 
     @property
+    def capacity(self) -> int:
+        return self.capacity_override if self.capacity_override is not None else self.qos.queue_size
+
+    @property
     def depth(self) -> int:
         return len(self._store.items)
 
@@ -599,14 +640,17 @@ class SubscriberQueue:
     def _try_put(self, msg: Message, stats: TopicFlowStats) -> bool:
         """Enqueue msg; apply overflow policy; return True if enqueued."""
         self._update_depth_area()
-        if self.depth >= self.qos.queue_size:
+        cap = self.capacity
+        if self.depth >= cap:
             stats.total_dropped_queue_full += 1
             if self.qos.reliability == "BEST_EFFORT":
                 stats.total_dropped_best_effort += 1
                 self._record_drop(stats)
                 return False
-            # RELIABLE: head-drop oldest to make room
-            if self._store.items:
+            # RELIABLE: head-drop oldest to make room. A loop only because a
+            # leaking buffer can shrink below the current depth; at the declared
+            # capacity it pops exactly one.
+            while self._store.items and self.depth >= cap:
                 self._store.items.pop(0)
                 self._record_drop(stats)
                 self._update_depth_area()
@@ -675,7 +719,10 @@ class TopicFanout:
     def queue_for(self, subscriber_id: str) -> Optional[SubscriberQueue]:
         return self._queues.get(subscriber_id)
 
-    def publish(self, msg: Message, failed_nodes: Set[str]) -> int:
+    def publish(
+        self, msg: Message, failed_nodes: Set[str],
+        gate: Optional[Any] = None,
+    ) -> int:
         """
         Fan out *msg* to all live subscriber queues.
 
@@ -683,16 +730,26 @@ class TopicFanout:
         Increments stats.total_published once regardless of fan-out width —
         including when no queue accepted it, so that this denominator agrees
         with the windowed publish counters used for the fault-impact rates.
+
+        ``gate(subscriber_id) -> bool`` drops copies the network cannot carry
+        (runtime deployment model only).
         """
         n_queued = 0
         for sub_id, sq in self._queues.items():
             if sub_id in failed_nodes:
+                continue
+            if gate is not None and not gate(sub_id):
                 continue
             if sq._try_put(msg, self.stats):
                 n_queued += 1
         self.stats.total_published += 1
         self._history.append(msg)
         return n_queued
+
+    def publish_lost(self, msg: Message) -> None:
+        """Account an emitted message that no reader can get (dead broker, cut path)."""
+        self.stats.total_published += 1
+        self._history.append(msg)
 
     def replay(
         self,
@@ -788,6 +845,34 @@ def _make_bucketer(
     return bucket
 
 
+def surviving_delivery_rate(
+    topic_stats: Dict[str, TopicFlowStats],
+    sub_stats: Dict[str, SubscriberFlowStats],
+    fault_node: Optional[str],
+    window: str,
+) -> float:
+    """Delivered share of one window's demand, over the components that survive.
+
+    The same quantity `_annotate_fault_cascade._rate` computes from its live
+    window counters, recomputed from a finished result so a no-fault baseline
+    can be scored against any faulted node: that node's receipts and its share
+    of each topic's fan-out are left out of both numerator and denominator.
+    """
+    faulted = sub_stats.get(fault_node) if fault_node else None
+    own = 0
+    if faulted is not None:
+        own = faulted.received_pre_fault if window == "pre" else faulted.received_post_fault
+    delivered = -own
+    expected = 0
+    for tid, ts in topic_stats.items():
+        delivered += ts.delivered_pre if window == "pre" else ts.delivered_post
+        published = ts.published_pre if window == "pre" else ts.published_post
+        readers = ts.n_subscribers - (
+            1 if faulted is not None and tid in faulted.subscribed_topics else 0)
+        expected += published * readers
+    return delivered / expected if expected else 0.0
+
+
 def _publisher_process(
     env: simpy.Environment,
     app_id: str,
@@ -805,6 +890,10 @@ def _publisher_process(
     use_poisson: bool = False,
     phase_offset_s: float = 0.0,
     payload_size_bytes: int = DEFAULT_PAYLOAD_BYTES,
+    behavior: Any = None,
+    runtime: Any = None,
+    workload: Any = None,
+    recorder: Optional[List[Dict[str, Any]]] = None,
 ) -> Generator:
     """
     Publisher SimPy process.
@@ -835,10 +924,14 @@ def _publisher_process(
 
     next_emit = env.now
     while True:
-        if use_poisson:
+        if workload is not None:
+            interval = workload.interval(f"{app_id}|{topic_id}", rate_hz, env.now, rng)
+        elif use_poisson:
             interval = rng.expovariate(rate_hz) if rate_hz > 0 else 1.0
         else:
             interval = 1.0 / rate_hz if rate_hz > 0 else 1.0
+        if runtime is not None:
+            interval = runtime.interval(app_id, interval)
 
         next_emit += interval
 
@@ -865,9 +958,17 @@ def _publisher_process(
                 fanout.stats.published_pre += 1
             else:
                 fanout.stats.published_post += 1
+        if runtime is not None:
+            runtime.on_demand(topic_id, emit_time)
 
         # Failed publishers keep generating demand but emit nothing.
         if app_id in failed_nodes:
+            continue
+        if runtime is not None and runtime.withhold(app_id, rng):
+            continue
+        # Reactive model: a stalled (or degraded) application withholds some or
+        # all of its schedule. Its demand stays counted, exactly like a dead one.
+        if behavior is not None and not behavior.should_emit(app_id, topic_id, emit_time):
             continue
 
         if window == "post":
@@ -881,7 +982,13 @@ def _publisher_process(
             created_at=emit_time,
             payload_size_bytes=payload_size_bytes,
         )
-        fanout.publish(msg, failed_nodes)
+        if recorder is not None:
+            recorder.append(make_event(emit_time, "saag.publish", app_id, topic_id,
+                                       **{"messaging.message.id": msg.msg_id}))
+        if runtime is not None:
+            runtime.publish(fanout, msg)
+        else:
+            fanout.publish(msg, failed_nodes)
 
 
 
@@ -908,6 +1015,9 @@ def _subscriber_process(
     queue_wait_windows: Optional[Dict[str, list]] = None,
     service_time_windows: Optional[Dict[str, list]] = None,
     bytes_windows: Optional[Dict[str, Dict[str, int]]] = None,
+    behavior: Any = None,
+    runtime: Any = None,
+    recorder: Optional[List[Dict[str, Any]]] = None,
 ) -> Generator:
     """
     Subscriber SimPy process.
@@ -930,7 +1040,15 @@ def _subscriber_process(
         # BUG-MFS-4 FIX: bail out BEFORE get() if subscriber has failed.
         # This avoids ever dequeuing a message only to discard it.
         if app_id in failed_nodes:
-            return
+            if runtime is None:
+                return
+            # Runtime faults can end: wait for a restart or a standby takeover
+            # (an event that never fires for a permanent crash).
+            yield runtime.recovered(app_id)
+            continue
+        if runtime is not None and runtime.is_frozen(app_id):
+            yield runtime.thawed(app_id)
+            continue
 
         msg_event = sq.get()
         msg: Message = yield msg_event
@@ -942,7 +1060,10 @@ def _subscriber_process(
             sub_stats.missed_per_topic[received_key] += 1
             if fault_time is not None and env.now >= fault_time:
                 sub_stats.missed_post_fault += 1
-            return
+            if runtime is None:
+                return
+            yield runtime.recovered(app_id)
+            continue
 
         enqueue_time = msg.created_at
         dequeue_time = env.now
@@ -959,10 +1080,12 @@ def _subscriber_process(
         # queues for the same server, so a fault that silences one publisher
         # relieves the others -- an effect no topological oracle can express.
         service_start = env.now
+        pure_service_s = 0.0
         if station is not None:
             with station.resource.request(priority=service_priority) as req:
                 yield req
                 service_time = station.sample_service_time(rng, station.scale_for(topic_id))
+                pure_service_s = service_time
                 if service_time > 0:
                     station.record_service(service_time, window=window)
                     yield env.timeout(service_time)
@@ -991,9 +1114,24 @@ def _subscriber_process(
             sub_stats.missed_per_topic[received_key] += 1
             if post_fault:
                 sub_stats.missed_post_fault += 1
+            if recorder is not None:
+                recorder.append(make_event(delivery_time, "saag.deadline_miss", app_id, topic_id,
+                                           publisher=msg.publisher_id, latency_ms=e2e_latency_ms))
             continue
 
         # Delivered
+        if recorder is not None:
+            recorder.append(make_event(
+                delivery_time, "saag.deliver", app_id, topic_id,
+                publisher=msg.publisher_id, created_unix_s=msg.created_at,
+                # Pure service, not the wait for the shared station: the trace
+                # reports what a calibrator should fit, as the testbed agent does.
+                latency_ms=e2e_latency_ms, service_ms=pure_service_s * 1000.0,
+                **{"messaging.message.id": msg.msg_id}))
+        if behavior is not None:
+            behavior.on_delivery(app_id, topic_id, env.now)
+        if runtime is not None:
+            runtime.on_delivered(app_id, msg.window_time)
         payload_bytes = getattr(msg, "payload_size_bytes", 64)
         topic_stats.total_bytes_delivered += payload_bytes
 
@@ -1016,6 +1154,9 @@ def _subscriber_process(
         # faulted node's own receipts out of both windows.
         if window is not None:
             delivery_window_counts[window] += 1
+            per_topic = sub_stats.received_window_per_topic.setdefault(
+                received_key, {"pre": 0, "post": 0})
+            per_topic[window] += 1
             if window == "pre":
                 topic_stats.delivered_pre += 1
                 sub_stats.received_pre_fault += 1
@@ -1192,6 +1333,53 @@ class MessageFlowSimulator:
         Under ``"size"``, the payload whose service cost equals the per-message
         overhead: a message of topic t costs ``1 + size_t / payload_overhead_bytes``
         relative units. A declared, uncalibrated constant. Default 1024.
+    behavior_model : str
+        ``"open_loop"`` (default, published) or ``"reactive"``; see
+        ``BEHAVIOR_MODELS``.
+    rng_streams : str
+        ``"shared"`` (default, published) or ``"per_process"``; see ``RNG_STREAMS``.
+    estimator : str
+        ``"windows"`` (default, published) or ``"paired"``; see ``ESTIMATORS``.
+    baseline_cache : dict, optional
+        Cache for the paired estimator's no-fault baseline runs, keyed by
+        (seed, fault_time). Pass one dict to every simulator of a sweep.
+    faults : list of FaultSpec (or dicts), optional
+        Runtime fault schedule (saag/simulation/runtime/faults.py): crashes,
+        transient crashes, gray failures, storms, link flaps. The first entry is
+        the fault the record reports. Mutually exclusive with ``fault_node``.
+    deployment_model : str
+        ``"none"`` (default, published) or ``"stations"``: brokers become
+        service stations on the data path with failover, co-located
+        applications share their host's CPU, and hosts and brokers are
+        labelled.
+    network_gating : bool
+        Under ``deployment_model="stations"``, count a delivery only while
+        CONNECTS_TO still connects publisher, routing broker and subscriber,
+        so host outages and LINK_FLAP partition the network. Off by default,
+        as in FailureSimulator and FaultInjector.
+    replica_aware : bool
+        A host outage kills a multi-hosted component only when all its hosts
+        are down (same semantics as FaultInjector / FailureSimulator).
+    hot_standby : bool
+        Components declaring ``hotstandby`` come back ``failover_delay_s``
+        after a crash.
+    workload_model : str
+        ``"declared"`` (default) or ``"mmpp"`` bursty arrivals with
+        ``burst_ratio``, ``burst_fraction``, ``mean_burst_s``.
+    timeline_bin_s : float
+        Bin width of the delivery timeline used to measure recovery time.
+    staleness_periods : float
+        Reactive model: how many periods of an input topic its last delivery
+        stays fresh (a floor under any declared deadline). Default 3.
+    record_events : bool
+        Keep a per-message event log (publish / deliver / deadline_miss) in the
+        trace format of `saag.simulation.calibration`, on
+        ``MessageFlowResult.events``; ``export_events(path)`` writes it as
+        OpenTelemetry-shaped JSON lines. Off by default (memory).
+    telemetry_profile : RuntimeTelemetryProfile, optional
+        Measured parameters (`TelemetryCalibrator`): topic rates, per-app
+        service-time distributions and inferred trigger policies override the
+        declared / calibrated ones.
     """
 
     def __init__(
@@ -1216,8 +1404,73 @@ class MessageFlowSimulator:
         durability_replay_delay_s: Optional[float] = None,
         payload_model: str = "fixed",
         payload_overhead_bytes: float = 1024.0,
+        behavior_model: str = "open_loop",
+        rng_streams: str = "shared",
+        estimator: str = "windows",
+        baseline_cache: Optional[Dict[Any, "MessageFlowResult"]] = None,
+        faults: Optional[List[Any]] = None,
+        deployment_model: str = "none",
+        replica_aware: bool = False,
+        hot_standby: bool = False,
+        failover_delay_s: float = 1.0,
+        workload_model: str = "declared",
+        burst_ratio: float = 4.0,
+        burst_fraction: float = 0.1,
+        mean_burst_s: float = 1.0,
+        timeline_bin_s: float = 1.0,
+        staleness_periods: float = 3.0,
+        record_events: bool = False,
+        telemetry_profile: Optional[Any] = None,
+        network_gating: bool = False,
     ) -> None:
         _require_simpy()
+        from .runtime.faults import DEPLOYMENT_MODELS, FaultSpec
+        from .runtime.workload import WORKLOAD_MODELS
+        for name, value, allowed in (
+            ("deployment_model", deployment_model, DEPLOYMENT_MODELS),
+            ("workload_model", workload_model, WORKLOAD_MODELS),
+        ):
+            if value not in allowed:
+                raise ValueError(f"{name} must be one of {allowed}, got {value!r}")
+        if faults is not None and fault_node is not None:
+            raise ValueError("pass either fault_node/fault_time or faults, not both")
+        self.faults: Optional[List[FaultSpec]] = (
+            None if faults is None
+            else [f if isinstance(f, FaultSpec) else FaultSpec.from_dict(f) for f in faults])
+        self.deployment_model = deployment_model
+        self.replica_aware = replica_aware
+        self.hot_standby = hot_standby
+        self.failover_delay_s = float(failover_delay_s)
+        self.workload_model = workload_model
+        self.burst_ratio = burst_ratio
+        self.burst_fraction = burst_fraction
+        self.mean_burst_s = mean_burst_s
+        self.timeline_bin_s = timeline_bin_s
+        self.staleness_periods = float(staleness_periods)
+        self.record_events = record_events
+        self.telemetry_profile = telemetry_profile
+        self.network_gating = network_gating
+        #: Paired-baseline copies keep the runtime path even with no faults, so
+        #: both runs consume their RNG streams identically.
+        self._force_runtime = False
+        for name, value, allowed in (
+            ("behavior_model", behavior_model, BEHAVIOR_MODELS),
+            ("rng_streams", rng_streams, RNG_STREAMS),
+            ("estimator", estimator, ESTIMATORS),
+        ):
+            if value not in allowed:
+                raise ValueError(f"{name} must be one of {allowed}, got {value!r}")
+        self.behavior_model = behavior_model
+        self.rng_streams = rng_streams
+        self.estimator = estimator
+        #: Shared across simulators of one sweep so the no-fault baseline of the
+        #: paired estimator runs once per (seed, fault_time), not once per fault.
+        self.baseline_cache = baseline_cache if baseline_cache is not None else {}
+        #: Set on the internal baseline copy: bucket on fault_time, fail nothing.
+        self._phantom_fault = False
+        #: On a paired baseline: the faulted run's primary target, excluded from
+        #: the delivery timeline the same way.
+        self._baseline_primary: Optional[str] = None
         if qos_mode not in QOS_MODES:
             raise ValueError(
                 f"qos_mode must be one of {QOS_MODES}, got {qos_mode!r}"
@@ -1263,6 +1516,12 @@ class MessageFlowSimulator:
         self.duration = duration
         self.fault_node = fault_node
         self.fault_time = fault_time if fault_time is not None else duration / 2.0
+        if self.faults:
+            # The first fault is the one the record and I_dyn are reported for.
+            self.fault_node = self.faults[0].target
+            self.fault_time = self.faults[0].start_s
+        elif self.faults is None and fault_node is not None and self._runtime_requested:
+            self.faults = [FaultSpec(fault_node, "crash", self.fault_time)]
         self.seed = seed
         self.default_queue_size = default_queue_size
         self.default_publish_rate_hz = default_publish_rate_hz
@@ -1270,6 +1529,7 @@ class MessageFlowSimulator:
         self.max_latency_samples = max_latency_samples
         self.warmup_s = warmup_s
         self.guard_band_s = guard_band_s
+        self._publisher_counts: Optional[Dict[str, int]] = None
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -1281,7 +1541,10 @@ class MessageFlowSimulator:
         Falls back to default_publish_rate_hz.
         """
         base_rate = self.default_publish_rate_hz
-        if topic_id in self.graph.nodes:
+        measured = self._measured_rate(topic_id)
+        if measured is not None:
+            base_rate = measured
+        elif topic_id in self.graph.nodes:
             topic_node = self.graph.nodes[topic_id]
             freq = topic_node.get("frequency", topic_node.get("topic_frequency"))
             if freq is not None:
@@ -1290,11 +1553,15 @@ class MessageFlowSimulator:
                 except (TypeError, ValueError):
                     pass
 
-        # Count the number of active publishers publishing to this topic
-        num_pubs = 0
-        for src, tgt, data in self.graph.edges(data=True):
-            if data.get("type") == "PUBLISHES_TO" and tgt == topic_id:
-                num_pubs += 1
+        # Publisher counts are computed once per simulator: rescanning every edge
+        # here, once per publisher edge, made setup quadratic in the edge count.
+        if self._publisher_counts is None:
+            counts: Dict[str, int] = defaultdict(int)
+            for _, tgt, data in self.graph.edges(data=True):
+                if data.get("type") == "PUBLISHES_TO":
+                    counts[tgt] += 1
+            self._publisher_counts = counts
+        num_pubs = self._publisher_counts.get(topic_id, 0)
 
         if num_pubs > 0:
             return base_rate / num_pubs
@@ -1394,6 +1661,12 @@ class MessageFlowSimulator:
             and self.qos_mode in _CALIBRATED_MODES
         )
 
+    def _measured_rate(self, topic_id: str) -> Optional[float]:
+        prof = self.telemetry_profile
+        if prof is not None and topic_id in getattr(prof, "msg_rate_per_sec", {}):
+            return float(prof.msg_rate_per_sec[topic_id])
+        return None
+
     def topic_aggregate_rate(self, topic_id: str) -> float:
         """The topic's declared publication rate, before it is split per publisher.
 
@@ -1403,6 +1676,9 @@ class MessageFlowSimulator:
         topic happens to have — i.e. on exactly the topology the fault perturbs,
         which would confound the thing being measured with the thing perturbing it.
         """
+        measured = self._measured_rate(topic_id)
+        if measured is not None:
+            return measured
         if topic_id in self.graph.nodes:
             node = self.graph.nodes[topic_id]
             freq = node.get("frequency", node.get("topic_frequency"))
@@ -1504,6 +1780,18 @@ class MessageFlowSimulator:
                 }
         return stations
 
+    def _apply_measured_service(self, stations: Dict[str, "ServiceStation"]) -> None:
+        """Measured service-time distributions override the calibrated ones."""
+        prof = self.telemetry_profile
+        for app, fit in sorted(getattr(prof, "service_time_dist", {}).items()):
+            st = stations.get(app)
+            if st is None:
+                continue
+            st.service_time_s = float(fit["mean_s"])
+            st.distribution = "exponential" if fit.get("dist") == "exponential" else "lognormal"
+            st.cv = float(fit.get("cv", 1.0))
+            st.calibrated = False
+
     def _node_processing_times(self) -> Dict[str, float]:
         """Per-node processing time, falling back to the configured default."""
         proc_time: Dict[str, float] = {}
@@ -1601,12 +1889,25 @@ class MessageFlowSimulator:
         # Per-topic decomposition, so a result can say *which* topics carried the
         # loss rather than only how large the system-wide drop was. Topics whose
         # windows carried no demand are omitted: unmeasured is not zero.
+        #
+        # The faulted node's own receipts are subtracted per topic, as `_rate`
+        # does system-wide; otherwise a topic whose only reader is the faulted
+        # node reports a 1.0 drop that `i_dyn` itself excludes.
         topic_stats = {tid: fo.stats for tid, fo in fanouts.items()}
-        record.per_topic_i_dyn = {
-            tid: round(stats.i_dyn_topic, 6)
-            for tid, stats in topic_stats.items()
-            if stats.i_dyn_topic is not None
-        }
+        own_by_topic = faulted.received_window_per_topic if faulted else {}
+
+        def _topic_rate(tid: str, window: str) -> Optional[float]:
+            expected = pub_window[tid][window] * surviving_subs[tid]
+            if not expected:
+                return None
+            own_t = own_by_topic.get(tid, {}).get(window, 0)
+            return (del_window[tid][window] - own_t) / expected
+
+        record.per_topic_i_dyn = {}
+        for tid in topic_stats:
+            pre, post = _topic_rate(tid, "pre"), _topic_rate(tid, "post")
+            if pre is not None and post is not None:
+                record.per_topic_i_dyn[tid] = round(pre - post, 6)
         record.deadline_violations_before = sum(
             s.deadline_violations_pre for s in topic_stats.values())
         record.deadline_violations_after = sum(
@@ -1716,7 +2017,7 @@ class MessageFlowSimulator:
 
         # Resolved before the queues are built: SubscriberQueue needs it to bucket
         # overflow drops into the pre/post windows.
-        fault_time = self.fault_time if self.fault_node else None
+        fault_time = self.fault_time if (self.fault_node or self._phantom_fault) else None
 
         bucket_of = _make_bucketer(fault_time, self.warmup_s, self.guard_band_s)
 
@@ -1725,6 +2026,7 @@ class MessageFlowSimulator:
         )
         proc_time = self._node_processing_times()
         stations = self._build_service_stations(env, sub_edges, proc_time)
+        self._apply_measured_service(stations)
 
         # Fan-out width, recorded once the subscribers are registered. Without it
         # TopicFlowStats.delivery_rate divides per-(subscriber, message) deliveries
@@ -1746,6 +2048,41 @@ class MessageFlowSimulator:
         for src, tgt, _ in pub_edges:
             pubs_of[tgt].append(src)
 
+        subscriptions: Dict[str, List[str]] = defaultdict(list)
+        for src, tgt, _ in sub_edges:
+            subscriptions[src].append(tgt)
+        publications: Dict[str, Set[str]] = defaultdict(set)
+        for src, tgt, _ in pub_edges:
+            publications[src].add(tgt)
+        behavior = None
+        if self.behavior_model == "reactive":
+            from .runtime.behavior import ReactiveBehavior
+            behavior = ReactiveBehavior.build(
+                self.graph, subscriptions, publications,
+                {tid: self.topic_aggregate_rate(tid) for tid in fanouts},
+                self.staleness_periods,
+                policy_overrides=getattr(self.telemetry_profile, "trigger_policy", None),
+            )
+
+        def _stream(kind: str, app: str, topic: str) -> random.Random:
+            if self.rng_streams == "shared":
+                return rng
+            return random.Random(derive_seed(self.seed, f"{kind}|{app}|{topic}"))
+
+        recorder: Optional[List[Dict[str, Any]]] = [] if self.record_events else None
+        runtime = None
+        workload = None
+        if self._runtime_requested:
+            from .runtime.faults import RuntimeController
+            runtime = RuntimeController(
+                env, self, failed_nodes, fanouts, stations, sub_queues,
+                pub_edges, sub_edges, self.faults or [],
+                primary_target=self.fault_node or self._baseline_primary,
+            )
+            if self.workload_model == "mmpp":
+                from .runtime.workload import MMPP
+                workload = MMPP(self.burst_ratio, self.burst_fraction, self.mean_burst_s)
+
         for src, tgt, _ in pub_edges:
             topic_node = self.graph.nodes[tgt] if tgt in self.graph.nodes else {}
             rate = self.generate_workload(tgt)
@@ -1764,7 +2101,7 @@ class MessageFlowSimulator:
                 fault_time=fault_time,
                 window_counts=pub_window[tgt],
                 msg_counter=msg_counter,
-                rng=rng,
+                rng=_stream("pub", src, tgt),
                 bucket_of=bucket_of,
                 processing_time_s=(
                     0.0 if self._calibration_active
@@ -1776,6 +2113,10 @@ class MessageFlowSimulator:
                     int(self.topic_payload_bytes(tgt)) if self.payload_model == "size"
                     else DEFAULT_PAYLOAD_BYTES
                 ),
+                behavior=behavior,
+                runtime=runtime,
+                workload=workload,
+                recorder=recorder,
             ))
 
         for src, tgt, data in sub_edges:
@@ -1793,7 +2134,7 @@ class MessageFlowSimulator:
                 sub_stats=sub_stats[src],
                 topic_stats=topic_stats[tgt],
                 delivery_window_counts=del_window[tgt],
-                rng=rng,
+                rng=_stream("sub", src, tgt),
                 bucket_of=bucket_of,
                 max_latency_samples=self.max_latency_samples,
                 processing_time_s=proc_time.get(src, self.default_processing_time_s),
@@ -1809,6 +2150,9 @@ class MessageFlowSimulator:
                 queue_wait_windows=queue_wait_windows,
                 service_time_windows=service_time_windows,
                 bytes_windows=bytes_window,
+                behavior=behavior,
+                runtime=runtime,
+                recorder=recorder,
             ))
 
         fault_event_record: Optional[FaultEventRecord] = None
@@ -1822,7 +2166,8 @@ class MessageFlowSimulator:
                     "  [t=%.1f] Injecting fault: %s (%s)",
                     env.now, self.fault_node, node_type,
                 )
-                failed_nodes.add(self.fault_node)
+                if runtime is None:
+                    failed_nodes.add(self.fault_node)
                 fault_event_record = FaultEventRecord(
                     fault_time=env.now,
                     faulted_node_id=self.fault_node,
@@ -1900,12 +2245,39 @@ class MessageFlowSimulator:
                 stations=stations,
                 sub_queues=sub_queues,
             )
+            if behavior is not None:
+                from .runtime.behavior import stall_summary
+                (fault_event_record.stalled_apps,
+                 fault_event_record.time_to_stall_s,
+                 fault_event_record.cascade_hops) = stall_summary(
+                    behavior, self.fault_node, self.fault_time,
+                    subscriptions, publications, self.duration)
+            if runtime is not None:
+                fault_event_record.cascade_silenced_publishers = sorted(
+                    runtime.ever_failed & set(publications)) or [self.fault_node]
+                fault_event_record.runtime_events = runtime.events
+                primary = self.faults[0]
+                if primary.end_s is not None and primary.end_s < self.duration:
+                    fault_event_record.time_to_recover_s = runtime.time_to_recover(
+                        pre_until=primary.start_s, after=primary.end_s)
+            if self.estimator == "paired":
+                baseline = self._paired_baseline()
+                fault_event_record.delivery_rate_baseline_after = surviving_delivery_rate(
+                    baseline.topic_stats, baseline.subscriber_stats, self.fault_node, "post")
+                fault_event_record.i_dyn_paired = (
+                    fault_event_record.delivery_rate_baseline_after
+                    - fault_event_record.delivery_rate_after
+                )
 
         # This engine can only observe components that carry pub/sub traffic.
         # Brokers (ROUTES) and Nodes (RUNS_ON) are invisible to it, so faulting
         # one is a no-op — they are reported unlabelled rather than scored 0.0,
         # because an omitted component is unmeasured, not measured as harmless.
         labeled = {s for s, _, _ in pub_edges} | {s for s, _, _ in sub_edges}
+        if runtime is not None:
+            # With the deployment in the data path, brokers and hosts are
+            # observable too.
+            labeled |= runtime.labeled_components()
 
         # Google SRE Four Golden Signals telemetry report (overall run)
         all_latency = [s for ts in topic_stats.values() for s in ts.latency_samples]
@@ -1971,4 +2343,45 @@ class MessageFlowSimulator:
             labeled_node_ids=sorted(labeled),
             unlabeled_node_ids=sorted(set(self.graph.nodes) - labeled),
             golden_signals=overall_signals,
+            runtime_config=self._runtime_config(),
+            events=recorder,
         )
+
+    @property
+    def _runtime_requested(self) -> bool:
+        """True when any option needs the runtime controller."""
+        return bool(
+            self.faults or self._force_runtime
+            or self.deployment_model != "none" or self.hot_standby
+            or self.workload_model != "declared"
+        )
+
+    def _runtime_config(self) -> Dict[str, Any]:
+        """Runtime options that differ from the published defaults."""
+        defaults = {"behavior_model": "open_loop", "rng_streams": "shared",
+                    "estimator": "windows", "deployment_model": "none",
+                    "replica_aware": False, "hot_standby": False,
+                    "workload_model": "declared", "network_gating": False}
+        out = {k: getattr(self, k) for k, v in defaults.items() if getattr(self, k) != v}
+        if self.faults:
+            out["faults"] = [f.to_dict() for f in self.faults]
+        if self.workload_model == "mmpp":
+            out.update(burst_ratio=self.burst_ratio, burst_fraction=self.burst_fraction,
+                       mean_burst_s=self.mean_burst_s)
+        if self.behavior_model == "reactive":
+            out["staleness_periods"] = self.staleness_periods
+        return out
+
+    def _paired_baseline(self) -> MessageFlowResult:
+        """The same run without the fault: same settings, streams and windows."""
+        key = (self.seed, self.fault_time)
+        if key not in self.baseline_cache:
+            base = copy.copy(self)
+            base._force_runtime = self._runtime_requested
+            base.faults = [] if self.faults is not None else None
+            base._baseline_primary = self.fault_node
+            base.fault_node = None
+            base.estimator = "windows"
+            base._phantom_fault = True
+            self.baseline_cache[key] = base.run()
+        return self.baseline_cache[key]

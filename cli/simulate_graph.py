@@ -16,6 +16,16 @@ Two simulation modes, each accessible as a subcommand:
 
   combined       Run both modes in sequence.
 
+  testbed        Emulated DDS testbed: build | run | calibrate | fidelity.
+                 Runs the scenario as a real pub-sub system (Docker + Cyclone
+                 DDS, or in-process with --mode local), injects the same
+                 faults, and compares simulated with observed behaviour.
+
+  runtime-sweep  Fault every candidate under the runtime engine (reactive
+                 behaviour, deployment on the data path, paired estimator)
+                 and write ``runtime_labels.json``: the multi-dimensional
+                 runtime labels and their order-k references.
+
 EXAMPLES
 ────────
 
@@ -43,6 +53,26 @@ EXAMPLES
       --output output/simulation/ \\
       --export-json
 
+  # Runtime message-flow: reactive relays, brokers/hosts on the data path,
+  # a 5 s transient crash of a host at t=30 s
+  python cli/simulate_graph.py message-flow \
+      --input data/scenarios/atm_system.json \
+      --behavior-model reactive --deployment-model stations \
+      --fault-node N1 --fault-mode transient_crash --fault-duration 5 \
+      --fault-time 30 --duration 60 --export-json
+
+  # Runtime labels for every app, broker and host, 3 seeds, 8 workers
+  python cli/simulate_graph.py runtime-sweep \
+      --input data/scenarios/atm_system.json --seeds 42,123,456 --workers 8
+
+  # Emulated testbed: build, run 60 s with a host crash, calibrate, compare
+  python cli/simulate_graph.py testbed build --input data/scenarios/atm_system.json \
+      --output output/testbed/atm --duration 60
+  python cli/simulate_graph.py testbed run --output output/testbed/atm \
+      --duration 60 --faults faults.json --mode docker
+  python cli/simulate_graph.py testbed calibrate --output output/testbed/atm
+  python cli/simulate_graph.py testbed fidelity --output output/testbed/atm --calibrated
+
   # Run both in one pass
   python cli/simulate_graph.py combined \
       --input data/atm_system.json \\
@@ -59,6 +89,9 @@ OUTPUT FILES
   message-flow  →  output/message_flow_results.json
                    output/message_flow_summary.txt
   combined      →  all of the above
+  runtime-sweep →  output/runtime_labels.json
+  testbed       →  <output>/{deployment.json,docker-compose.yml,telemetry/,
+                   run.json,profile.json,fidelity.json}
 """
 
 from __future__ import annotations
@@ -83,11 +116,17 @@ from saag.simulation.fault_injector import FaultInjector
 # try/except, so importing it costs nothing where SimPy is absent. The engine
 # itself is still constructed lazily inside _run_message_flow.
 from saag.simulation.message_flow_simulator import (
+    BEHAVIOR_MODELS,
+    ESTIMATORS,
     QOS_MODES,
     REPLAY_DEADLINE_POLICIES,
+    RNG_STREAMS,
     SERVICE_DISTRIBUTIONS,
     UTILIZATION_MODES,
 )
+from saag.simulation.runtime.faults import DEPLOYMENT_MODELS, FaultSpec, RuntimeFaultMode
+from saag.simulation.runtime.labels import RUNTIME_LABEL_SETTINGS
+from saag.simulation.runtime.workload import WORKLOAD_MODELS
 
 logger = logging.getLogger("simulate_graph")
 
@@ -154,6 +193,7 @@ def _run_fault_inject(args: argparse.Namespace) -> None:
         qos_factor_mode=getattr(args, "qos_factor", "ladder"),
         network_gating=getattr(args, "network_gating", False),
         replica_aware=getattr(args, "replica_aware", False),
+        failure_model=getattr(args, "failure_model", "step"),
     )
     result = injector.run(node_types=node_types, node_ids=node_ids)
     elapsed = time.perf_counter() - t0
@@ -294,6 +334,129 @@ def _write_fault_inject_text_summary(result, elapsed: float, output_dir: Path) -
 # message-flow subcommand
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _parse_params(items: List[str]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise SystemExit(f"--fault-param expects KEY=VALUE, got {item!r}")
+        try:
+            out[key] = float(value)
+        except ValueError:
+            out[key] = value
+    return out
+
+
+def _runtime_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
+    """Runtime-engine keyword arguments shared by message-flow and runtime-sweep."""
+    return {
+        "behavior_model": getattr(args, "behavior_model", "open_loop"),
+        "deployment_model": getattr(args, "deployment_model", "none"),
+        "rng_streams": getattr(args, "rng_streams", "shared"),
+        "replica_aware": getattr(args, "replica_aware", False),
+        "hot_standby": getattr(args, "hot_standby", False),
+        "failover_delay_s": getattr(args, "failover_delay", 1.0),
+        "workload_model": getattr(args, "workload_model", "declared"),
+        "staleness_periods": getattr(args, "staleness_periods", 3.0),
+        "network_gating": getattr(args, "network_gating", False),
+    }
+
+
+def _fault_specs(args: argparse.Namespace, fault_node: Optional[str],
+                 fault_time: Optional[float], duration: float) -> Optional[List[FaultSpec]]:
+    """--faults FILE, or --fault-node with a non-crash --fault-mode; else None (historical path)."""
+    if getattr(args, "faults", None):
+        return [FaultSpec.from_dict(d) for d in json.loads(Path(args.faults).read_text())]
+    mode = getattr(args, "fault_mode", "crash")
+    duration_s = getattr(args, "fault_duration", None)
+    params = _parse_params(getattr(args, "fault_param", []))
+    if fault_node and (mode != "crash" or duration_s or params):
+        start = float(fault_time) if fault_time else duration / 2.0
+        return [FaultSpec(fault_node, mode, start, duration_s, params)]
+    return None
+
+
+def _run_runtime_sweep(args: argparse.Namespace) -> None:
+    from saag.simulation.runtime.labels import runtime_labels
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        logger.error("Input file not found: %s", input_path)
+        sys.exit(1)
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    seeds = _parse_seeds(args.seeds)
+    settings = {
+        **RUNTIME_LABEL_SETTINGS,
+        "duration": float(args.duration),
+        "qos_mode": args.qos_mode,
+        "target_utilization": (float(args.target_utilization)
+                               if args.target_utilization else None),
+        **_runtime_kwargs(args),
+    }
+    fault = {"mode": args.fault_mode, "duration_s": args.fault_duration,
+             "params": _parse_params(args.fault_param)}
+    candidates = [n.strip() for n in args.nodes.split(",")] if args.nodes else None
+
+    logger.info("═" * 60)
+    logger.info("RUNTIME LABEL SWEEP")
+    logger.info("  Input    : %s", input_path)
+    logger.info("  Seeds    : %s", seeds)
+    logger.info("  Fault    : %s", fault)
+    logger.info("  Settings : %s", settings)
+    logger.info("═" * 60)
+
+    t0 = time.perf_counter()
+    out = runtime_labels(_load_graph(input_path), candidates=candidates, seeds=seeds,
+                         settings=settings, fault=fault, workers=args.workers)
+    elapsed = time.perf_counter() - t0
+    out_json = output_dir / "runtime_labels.json"
+    out_json.write_text(json.dumps(out, indent=2, sort_keys=True))
+
+    ranked = sorted(out["records"].items(),
+                    key=lambda kv: -((kv[1]["i_flow"] or {}).get("mean") or 0.0))
+    print(f"\nRuntime labels: {len(ranked)} candidates, seeds={seeds}, {elapsed:.1f} s")
+    print(f"  {'node':24s} {'type':12s} {'i_flow':>8s} {'i_deliv':>8s} {'ref_flow':>9s}")
+    for node, rec in ranked[:15]:
+        print(f"  {node:24s} {str(rec['node_type']):12s} "
+              f"{rec['i_flow']['mean']:8.4f} {rec['i_delivery']['mean']:8.4f} "
+              f"{rec['ref_flow_policy']:9.4f}")
+    print(f"  written → {out_json}")
+
+
+def _run_testbed(args: argparse.Namespace) -> None:
+    from saag.testbed import orchestrate
+
+    out = Path(args.output)
+    if args.action == "build":
+        if not args.input:
+            logger.error("testbed build needs --input")
+            sys.exit(1)
+        orchestrate.build(Path(args.input), out, args.duration, args.seed, args.target_utilization)
+        print(f"Testbed written → {out}")
+    elif args.action == "run":
+        faults = ([FaultSpec.from_dict(d) for d in json.loads(Path(args.faults).read_text())]
+                  if args.faults else [])
+        meta = orchestrate.run(out, args.duration, faults, mode=args.mode, seed=args.seed)
+        if meta["unsupported"]:
+            logger.warning("Faults not emulated on the testbed: %s", meta["unsupported"])
+        print(f"Run complete ({args.mode}, {args.duration:.0f} s) → {out / 'telemetry'}")
+    elif args.action == "calibrate":
+        prof = orchestrate.calibrate(out)
+        print(f"Calibrated {len(prof['msg_rate_per_sec'])} topic rates, "
+              f"{len(prof['service_time_dist'])} service-time fits, "
+              f"{len(prof['trigger_policy'])} trigger policies → {out / 'profile.json'}")
+    else:
+        rep = orchestrate.fidelity(out, calibrated=args.calibrated)
+        for metric, v in rep["steady_state"]["metrics"].items():
+            if "median_rel_error" in v:
+                print(f"  {metric:16s} n={v['n_compared']:4d}  median rel err "
+                      f"{v['median_rel_error'] if v['median_rel_error'] is not None else float('nan'):.3f}"
+                      f"  within tol {v['share_within_tolerance']}")
+        if "fault_response" in rep:
+            print(f"  stall-set Jaccard {rep['fault_response'].get('stall_jaccard')}")
+
+
 def _run_message_flow(args: argparse.Namespace) -> None:
     try:
         from saag.simulation.message_flow_simulator import MessageFlowSimulator
@@ -341,11 +504,18 @@ def _run_message_flow(args: argparse.Namespace) -> None:
     target_u = getattr(args, "target_utilization", 0.65)
     target_u = None if not target_u else float(target_u)
 
+    runtime_kw = _runtime_kwargs(args)
+    faults = _fault_specs(args, fault_node, fault_time, float(args.duration))
+    if faults is not None:
+        fault_node = None
     sim = MessageFlowSimulator(
         graph=g,
         duration=float(args.duration),
         fault_node=fault_node,
         fault_time=float(fault_time) if fault_time else None,
+        faults=faults,
+        estimator=getattr(args, "estimator", "windows"),
+        **runtime_kw,
         seed=args.seed,
         default_queue_size=getattr(args, "default_queue_size", 100),
         default_publish_rate_hz=getattr(args, "default_rate", 10.0),
@@ -599,6 +769,38 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--verbose", "-v", action="store_true",
                        help="Enable DEBUG logging.")
 
+    def _add_runtime(p: argparse.ArgumentParser, sweep: bool = False) -> None:
+        """Runtime-engine options (saag/simulation/runtime/). Defaults are the published engine,
+        except on runtime-sweep, whose defaults are the runtime oracle's."""
+        d = RUNTIME_LABEL_SETTINGS if sweep else {}
+        p.add_argument("--behavior-model", choices=BEHAVIOR_MODELS,
+                       default=d.get("behavior_model", "open_loop"),
+                       help="'reactive': publication is gated on input freshness, so a lost "
+                            "feed stalls downstream relays.  Default: %(default)s")
+        p.add_argument("--deployment-model", choices=DEPLOYMENT_MODELS,
+                       default=d.get("deployment_model", "none"),
+                       help="'stations': brokers and host CPUs on the data path, hosts and "
+                            "brokers labelled.  Default: %(default)s")
+        p.add_argument("--rng-streams", choices=RNG_STREAMS,
+                       default=d.get("rng_streams", "shared"),
+                       help="'per_process' gives common random numbers.  Default: %(default)s")
+        if not sweep:
+            p.add_argument("--estimator", choices=ESTIMATORS, default="windows",
+                           help="'paired' adds a same-stream no-fault baseline.  Default: windows")
+        p.add_argument("--replica-aware", action="store_true",
+                       help="A host outage kills a multi-hosted component only when all its "
+                            "hosts are down.")
+        p.add_argument("--hot-standby", action="store_true",
+                       help="Components declaring hotstandby come back after --failover-delay.")
+        p.add_argument("--failover-delay", type=float, default=1.0, metavar="SECONDS")
+        p.add_argument("--workload-model", choices=WORKLOAD_MODELS, default="declared",
+                       help="'mmpp': bursty arrivals with the declared mean rate.")
+        p.add_argument("--staleness-periods", type=float, default=3.0, metavar="K",
+                       help="Reactive model: input freshness window in periods.  Default: 3")
+        p.add_argument("--network-gating", action="store_true",
+                       help="With --deployment-model stations: CONNECTS_TO reachability "
+                            "gates delivery (host outages and link_flap partition).")
+
     def _add_network_gating(p: argparse.ArgumentParser) -> None:
         p.add_argument(
             "--network-gating", action="store_true",
@@ -675,6 +877,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "shared w(t) weight so durability participates too; 'none' disables "
             "QoS scaling and is the topology-only arm of the label ablation."
         ),
+    )
+    fi.add_argument(
+        "--failure-model",
+        choices=FaultInjector.FAILURE_MODELS,
+        default="step",
+        help="'step' (default, published labels): a subscriber at or above the "
+             "propagation threshold fails with the depth-damped probability. "
+             "'threshold_cdf': per-subscriber latent tolerance theta ~ U(0.1, 0.5), "
+             "so P(fail) follows the CDF of theta instead of a cliff.",
     )
 
     # ── edge-criticality ─────────────────────────────────────────────────
@@ -823,6 +1034,69 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Messages created within this distance of --fault-time are counted "
              "in neither window.  Default: 0.0",
     )
+    _add_runtime(mf)
+    mf.add_argument(
+        "--fault-mode", choices=[m.value for m in RuntimeFaultMode], default="crash",
+        help="Runtime fault mode for --fault-node (needs the runtime engine; any "
+             "mode other than 'crash' turns it on).  Default: crash",
+    )
+    mf.add_argument("--fault-duration", type=float, default=None, metavar="SECONDS",
+                    help="Duration of a bounded fault (transient_crash, freeze, ...).")
+    mf.add_argument("--fault-param", action="append", default=[], metavar="KEY=VALUE",
+                    help="Fault parameter, e.g. k=4 (slowdown), p=0.5 (omission). Repeatable.")
+    mf.add_argument("--faults", default=None, metavar="FAULTS.json",
+                    help="JSON list of fault specs {target, mode, start_s, duration_s, "
+                         "params}; replaces --fault-node/--fault-mode.")
+
+    # ── runtime-sweep ─────────────────────────────────────────────────────
+    rs = subparsers.add_parser(
+        "runtime-sweep",
+        help="Runtime labels: fault every candidate under the runtime engine.",
+        description=(
+            "Faults every candidate (Applications, plus Brokers and Nodes with the "
+            "stations deployment model) under MessageFlowSimulator's runtime engine "
+            "and writes runtime_labels.json: i_delivery, i_delivery_consumer, "
+            "i_flow, i_timeliness, i_recovery and their order-k references."
+        ),
+    )
+    _add_shared(rs)
+    _add_runtime(rs, sweep=True)
+    rs.add_argument("--seeds", default="42,123,456", metavar="42,123,...")
+    rs.add_argument("--nodes", default=None, metavar="ID1,ID2,...",
+                    help="Candidates to fault.  Default: every Application (+ Broker, Node).")
+    rs.add_argument("--duration", type=float, default=60.0, metavar="SECONDS")
+    rs.add_argument("--qos-mode", choices=QOS_MODES, default="full")
+    rs.add_argument("--target-utilization", type=float, default=0.65, metavar="RHO")
+    rs.add_argument("--fault-mode", choices=[m.value for m in RuntimeFaultMode], default="crash")
+    rs.add_argument("--fault-duration", type=float, default=None, metavar="SECONDS")
+    rs.add_argument("--fault-param", action="append", default=[], metavar="KEY=VALUE")
+    rs.add_argument("--workers", type=int, default=1,
+                    help="Parallel workers (one seed per worker).  Default: 1")
+
+    # ── testbed ───────────────────────────────────────────────────────────
+    tb = subparsers.add_parser(
+        "testbed",
+        help="Emulated DDS testbed: build, run (with chaos), calibrate, fidelity.",
+        description=(
+            "build: scenario -> deployment.json + Dockerfile + docker-compose.yml.  "
+            "run: run it (--mode local: in-process, no containers; --mode docker: "
+            "docker compose + Cyclone DDS) and apply --faults on schedule.  "
+            "calibrate: telemetry -> profile.json.  fidelity: simulate the same run "
+            "and compare it with the observed telemetry (a report, never a gate)."
+        ),
+    )
+    tb.add_argument("action", choices=("build", "run", "calibrate", "fidelity"))
+    tb.add_argument("--input", default=None, help="Scenario JSON (build).")
+    tb.add_argument("--layer", default=None, help=argparse.SUPPRESS)
+    tb.add_argument("--output", required=True, help="Testbed directory.")
+    tb.add_argument("--duration", type=float, default=60.0, metavar="SECONDS")
+    tb.add_argument("--seed", type=int, default=0)
+    tb.add_argument("--mode", choices=("local", "docker"), default="local")
+    tb.add_argument("--faults", default=None, metavar="FAULTS.json")
+    tb.add_argument("--target-utilization", type=float, default=0.65, metavar="RHO")
+    tb.add_argument("--calibrated", action="store_true",
+                    help="fidelity: simulate with profile.json from 'calibrate'.")
+    tb.add_argument("--verbose", "-v", action="store_true")
 
     # ── combined ──────────────────────────────────────────────────────────
     co = subparsers.add_parser(
@@ -869,7 +1143,7 @@ def main() -> None:
     if not args.input and getattr(args, "layer", None):
         args.input = f"data/{args.layer}.json"
 
-    if not args.input:
+    if not args.input and args.subcommand != "testbed":
         logger.error("Either --input or --layer must be specified.")
         sys.exit(1)
 
@@ -877,6 +1151,8 @@ def main() -> None:
         "fault-inject": _run_fault_inject,
         "edge-criticality": _run_edge_criticality,
         "message-flow": _run_message_flow,
+        "runtime-sweep": _run_runtime_sweep,
+        "testbed": _run_testbed,
         "combined": _run_combined,
     }
 

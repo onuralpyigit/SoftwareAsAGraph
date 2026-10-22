@@ -336,6 +336,7 @@ Systematic BFS cascade fault injection → `impact_scores.json`.
 | `--seeds` | `42,123,456,789,2024` | Comma-separated seeds. ≥ 2 required for the artifact's `label_stability` block to be measurable. |
 | `--cascade-depth` | `0` | Max depth (0 = unlimited) |
 | `--propagation-threshold` | `0.2` | Fraction of feed loss before cascade |
+| `--failure-model` | `step` | `threshold_cdf`: per-subscriber latent tolerance θ ~ U(0.1, 0.5) instead of the cliff at the threshold ([failure-simulation.md §4.8](failure-simulation.md#48-opt-in-threshold_cdf-failure-model)). Default reproduces the published labels. |
 | `--export-json` | `False` | Write JSON result files |
 
 The emitted `impact_scores.json` is schema 2.1: it names its `labeler`, declares
@@ -360,6 +361,32 @@ Discrete-event SimPy simulation.
 | `--default-queue-size` | `100` | Fallback broker queue capacity |
 | `--export-json` | `False` | Write JSON result files |
 
+Runtime-engine flags ([failure-simulation.md §7.11](failure-simulation.md#711-runtime-engine-reactive-behaviour-deployment--gray-failures-opt-in)); every default is the published engine:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--behavior-model` | `open_loop` | `reactive`: publication gated on input freshness, so faults propagate |
+| `--deployment-model` | `none` | `stations`: brokers and host CPUs on the data path; brokers and hosts labelled |
+| `--rng-streams` | `shared` | `per_process`: common random numbers |
+| `--estimator` | `windows` | `paired`: same-stream no-fault baseline, reports `i_dyn_paired` |
+| `--replica-aware` | off | A host outage kills a multi-hosted component only when all its hosts are down |
+| `--hot-standby` / `--failover-delay` | off / `1.0` | `hotstandby` components return after the delay |
+| `--workload-model` | `declared` | `mmpp`: bursty arrivals, same mean rate |
+| `--staleness-periods` | `3.0` | Reactive input-freshness window, in periods |
+| `--network-gating` | off | With `stations`: CONNECTS_TO reachability gates delivery |
+| `--fault-mode` | `crash` | Runtime fault mode for `--fault-node` (`transient_crash`, `freeze`, `slowdown`, `omission`, `babbling`, `buffer_leak`, `redelivery_storm`, `link_flap`) |
+| `--fault-duration` | `None` | Duration of a bounded fault |
+| `--fault-param KEY=VALUE` | — | Fault parameter (repeatable), e.g. `k=4`, `p=0.5` |
+| `--faults FILE` | `None` | JSON list of `{target, mode, start_s, duration_s, params}`; replaces `--fault-node` |
+
+#### `runtime-sweep`
+
+Faults every candidate under the runtime engine and writes `runtime_labels.json`: `i_delivery`, `i_delivery_consumer`, `i_flow`, `i_timeliness`, `i_recovery` with per-seed values and label stability, plus the order-k references `ref_delivery_first_order`, `ref_flow_reach`, `ref_flow_policy`. Defaults are the runtime oracle (`reactive`, `stations`, `per_process`, paired). Flags: the runtime flags above, plus `--seeds` (`42,123,456`), `--nodes`, `--duration` (`60`), `--qos-mode`, `--target-utilization`, `--fault-mode` / `--fault-duration` / `--fault-param`, and `--workers` (one seed per worker).
+
+#### `testbed`
+
+`testbed {build,run,calibrate,fidelity} --output DIR` — the emulated DDS testbed ([failure-simulation.md §7.12](failure-simulation.md#712-emulated-dds-testbed-calibration--fidelity-opt-in)). `build --input SCENARIO --duration S` writes `deployment.json`, `Dockerfile` and `docker-compose.yml`. `run --duration S [--faults FILE] [--mode local|docker]` runs it; `local` is in-process and needs no containers, while `docker` builds an image that downloads `cyclonedds`. `calibrate` writes `profile.json`. `fidelity [--calibrated]` simulates the same run and writes `fidelity.json`.
+
 #### `combined`
 
 Run `fault-inject` then `message-flow` in sequence. Accepts all flags from both subcommands.
@@ -368,6 +395,8 @@ Run `fault-inject` then `message-flow` in sequence. Accepts all flags from both 
 
 - `fault-inject` → `output/simulation/impact_scores.json`, `output/simulation/impact_scores_summary.txt`
 - `message-flow` → `output/simulation/message_flow_results.json`, `output/simulation/message_flow_summary.txt`
+- `runtime-sweep` → `output/simulation/runtime_labels.json`
+- `testbed` → `<output>/deployment.json`, `docker-compose.yml`, `telemetry/*.jsonl`, `run.json`, `profile.json`, `fidelity.json`
 - `combined` → all of the above
 
 ---

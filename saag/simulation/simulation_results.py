@@ -132,6 +132,9 @@ class FaultInjectionResult:
     #: correlation metric: a model scoring rho=0.93 against labels whose own
     #: test-retest rho is 0.91 has saturated, not underperformed.
     label_stability: Dict[str, Any] = field(default_factory=dict)
+    #: Non-default labeller settings (e.g. ``failure_model="threshold_cdf"``).
+    #: Empty for the published labels, and then omitted from `to_dict()`.
+    labeler_config: Dict[str, Any] = field(default_factory=dict)
 
     # Per-node records, keyed by node_id
     records: Dict[str, FaultInjectionRecord] = field(default_factory=dict)
@@ -180,6 +183,7 @@ class FaultInjectionResult:
             "unlabeled_node_ids": self.unlabeled_node_ids,
             "degenerate_node_types": self.degenerate_node_types,
             "label_stability": self.label_stability,
+            **({"labeler_config": self.labeler_config} if self.labeler_config else {}),
             "top_k_by_impact": self.top_k_by_impact,
             "records": {
                 nid: rec.to_dict() for nid, rec in self.records.items()
@@ -486,6 +490,9 @@ class SubscriberFlowStats:
     received_pre_fault: int = 0
     received_post_fault: int = 0
     missed_post_fault: int = 0
+    #: The same two windows split per topic, so a per-topic I_dyn can subtract
+    #: the faulted node's own receipts exactly as the system-wide rate does.
+    received_window_per_topic: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
     @property
     def total_received(self) -> int:
@@ -561,6 +568,24 @@ class FaultEventRecord:
     signals_before: Optional[GoldenSignalsReport] = None
     signals_after: Optional[GoldenSignalsReport] = None
 
+    # ── Runtime-behaviour extensions (saag/simulation/runtime/) ──────────────
+    # All None under the default open-loop, windowed run, and then omitted from
+    # `to_dict()`, so default result files are unchanged.
+    #: Paired estimator: the same run without the fault, on the same RNG
+    #: streams, measured over the same post window and surviving population.
+    delivery_rate_baseline_after: Optional[float] = None
+    i_dyn_paired: Optional[float] = None
+    #: Reactive model: applications that stalled after the fault, how long after
+    #: it each one did, and the deepest pub-sub hop among them.
+    stalled_apps: Optional[List[str]] = None
+    time_to_stall_s: Optional[Dict[str, float]] = None
+    cascade_hops: Optional[int] = None
+    #: Runtime fault controller: seconds from the end of a bounded primary fault
+    #: until delivery regained 95% of its pre-fault rate (None: never, or not a
+    #: bounded fault), and the controller's event log.
+    time_to_recover_s: Optional[float] = None
+    runtime_events: Optional[List[Dict[str, Any]]] = None
+
     @property
     def i_dyn(self) -> float:
         """I_dyn(v): the delivery-rate loss surviving consumers suffer.
@@ -612,7 +637,16 @@ class FaultEventRecord:
         out["delta_queue_overflows"] = self.delta_queue_overflows
         out["signals_before"] = self.signals_before.to_dict() if self.signals_before else None
         out["signals_after"] = self.signals_after.to_dict() if self.signals_after else None
+        for key in self._RUNTIME_FIELDS:
+            if out[key] is None:
+                del out[key]
         return out
+
+    _RUNTIME_FIELDS = (
+        "delivery_rate_baseline_after", "i_dyn_paired",
+        "stalled_apps", "time_to_stall_s", "cascade_hops",
+        "time_to_recover_s", "runtime_events",
+    )
 
 
 @dataclass
@@ -667,6 +701,24 @@ class MessageFlowResult:
     labeler: str = "MessageFlowSimulator"
     labeled_node_ids: List[str] = field(default_factory=list)
     unlabeled_node_ids: List[str] = field(default_factory=list)
+    #: Non-default runtime settings this run used (behavior_model, rng_streams,
+    #: estimator, ...). Empty for a default run, and then omitted from the dict.
+    runtime_config: Dict[str, Any] = field(default_factory=dict)
+    #: Per-message trace (``record_events=True``), in the format of
+    #: `saag.simulation.calibration`. Not part of `to_dict()`: export it with
+    #: `export_events` instead.
+    events: Optional[List[Dict[str, Any]]] = None
+
+    def export_events(self, path: Path) -> int:
+        """Write the event log as OpenTelemetry-shaped JSON lines; returns the count."""
+        if self.events is None:
+            raise ValueError("this run did not record events (record_events=False)")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as fh:
+            for ev in self.events:
+                fh.write(json.dumps(ev) + "\n")
+        return len(self.events)
 
     #: Google SRE Four Golden Signals report (overall run)
     golden_signals: Optional[GoldenSignalsReport] = None
@@ -700,6 +752,8 @@ class MessageFlowResult:
             "labeled_node_ids": self.labeled_node_ids,
             "unlabeled_node_ids": self.unlabeled_node_ids,
         }
+        if self.runtime_config:
+            d["runtime_config"] = self.runtime_config
         return d
 
     def save(self, path: Path) -> None:

@@ -58,8 +58,10 @@ For each candidate node v (Application or Broker by default):
 
 MULTI-SEED STABILITY
 ────────────────────
-When multiple seeds are supplied the cascade uses a seeded shuffle to break
-ties in wave propagation order.  I(v) is the mean across seeds;
+When multiple seeds are supplied, each seed drives the per-wave Bernoulli
+failure draws of the subscribers whose feed loss crossed the threshold (there
+is no tie-breaking shuffle; wave 0 draws at probability 1.0, so it is
+deterministic).  I(v) is the mean across seeds;
 impact_score_std is the standard deviation.  The cascade trace recorded is
 from the seed whose impact score is closest to the mean (median-representative
 seed).  [FIX: DESIGN-FI-2]
@@ -241,10 +243,28 @@ class FaultInjector:
         Single-fault injection means that happens only for single-hosted
         residents.  Off by default, which keeps the published labels: any one
         host failure kills a multi-hosted component.
+    failure_model : {"step", "threshold_cdf"}, optional
+        ``"step"`` (default) reproduces the published labels: a subscriber
+        whose feed loss reaches ``propagation_threshold`` fails with
+        probability ``depth_damp`` -- the ``min(1, loss/threshold)`` factor is
+        always 1 there, so the loss magnitude past the threshold never matters
+        and the label has a cliff at the threshold.
+        ``"threshold_cdf"`` gives every subscriber a latent tolerance
+        ``theta ~ U(threshold_range)``, drawn once per seed. It may fail
+        (probability ``depth_damp``) once its loss reaches theta, and it is
+        re-drawn only when its loss increases -- not on every wave, which made
+        the old odds depend on how long the cascade ran elsewhere. Averaged
+        over seeds, P(fail) = F_theta(loss) * depth_damp: the cliff becomes the
+        threshold distribution's CDF, and the seed spread now measures
+        threshold uncertainty. ``propagation_threshold`` is unused in this mode.
+    threshold_range : (float, float), optional
+        Support of theta under ``"threshold_cdf"``. Default (0.1, 0.5).
     """
 
     #: Accepted values for ``qos_factor_mode``.
     QOS_FACTOR_MODES = ("ladder", "wt", "none")
+    #: Accepted values for ``failure_model``.
+    FAILURE_MODELS = ("step", "threshold_cdf")
 
     def __init__(
         self,
@@ -259,7 +279,17 @@ class FaultInjector:
         depth_damp_floor: float = 0.25,
         network_gating: bool = False,
         replica_aware: bool = False,
+        failure_model: str = "step",
+        threshold_range: tuple = (0.1, 0.5),
     ) -> None:
+        if failure_model not in self.FAILURE_MODELS:
+            raise ValueError(
+                f"failure_model must be one of {self.FAILURE_MODELS}, got {failure_model!r}")
+        lo, hi = (float(x) for x in threshold_range)
+        if not 0.0 <= lo < hi <= 1.0:
+            raise ValueError(f"threshold_range must satisfy 0 <= lo < hi <= 1, got {threshold_range!r}")
+        self.failure_model = failure_model
+        self.threshold_range = (lo, hi)
         if qos_factor_mode not in self.QOS_FACTOR_MODES:
             raise ValueError(
                 f"qos_factor_mode must be one of {self.QOS_FACTOR_MODES}, "
@@ -442,6 +472,9 @@ class FaultInjector:
             )
 
         result.finalise()
+        if self.failure_model != "step":
+            result.labeler_config = {"failure_model": self.failure_model,
+                                     "threshold_range": list(self.threshold_range)}
         result.label_stability = self._compute_label_stability(result)
         self._record_degenerate_types(result)
         if self.strict_labels and result.degenerate_node_types:
@@ -644,6 +677,14 @@ class FaultInjector:
         """
         rng = random.Random(seed)
         idx = self._index
+        # threshold_cdf: latent per-subscriber tolerances, drawn up front in
+        # sorted order so the wave draws below see the same stream position
+        # whatever the cascade does.
+        theta: Dict[str, float] = {}
+        tested_at: Dict[str, float] = {}
+        if self.failure_model == "threshold_cdf":
+            lo, hi = self.threshold_range
+            theta = {s: lo + (hi - lo) * rng.random() for s in sorted(idx.all_subscribers)}
 
         failed_nodes: Set[str] = {node_id}
         orphaned_topics: Set[str] = set()
@@ -842,7 +883,15 @@ class FaultInjector:
                     continue
                 sub_loss = sum(feed_loss(topic_loss, cut, sub, t) for t in sorted(all_feeds)) / len(all_feeds)
                 
-                if sub_loss >= self.propagation_threshold and sub_loss > 1e-6:
+                if self.failure_model == "threshold_cdf":
+                    if (sub_loss > 1e-6 and sub_loss >= theta[sub]
+                            and sub_loss > tested_at.get(sub, -1.0) + 1e-12):
+                        tested_at[sub] = sub_loss
+                        if rng.random() < depth_damp:
+                            failed_nodes.add(sub)
+                            wave_new_failed.append(sub)
+                            next_frontier.append(sub)
+                elif sub_loss >= self.propagation_threshold and sub_loss > 1e-6:
                     # Failure probability scaled by propagation_threshold
                     prob = min(1.0, sub_loss / max(1e-6, self.propagation_threshold)) * depth_damp
                     if rng.random() < prob:

@@ -23,6 +23,7 @@
    - 4.5 [How to Run `FaultInjector`](#45-how-to-run-faultinjector)
    - 4.6 [Output Schema Snippet (`impact_scores.json`)](#46-output-schema-snippet-impact_scoresjson)
    - 4.7 [Academic Provenance & Label Stability](#47-academic-provenance--label-stability)
+   - 4.8 [Opt-In `threshold_cdf` Failure Model](#48-opt-in-threshold_cdf-failure-model)
 5. [Engine 2: `FailureSimulator` (Multi-Layer Structural & Quality Impact — Oracle $I_{\text{comp}}$)](#5-engine-2-failuresimulator-multi-layer-structural--quality-impact--oracle-i_textcomp)
    - 5.1 [Quick Facts](#51-quick-facts)
    - 5.2 [Intuition & Multi-Layer Structural Traversal](#52-intuition--multi-layer-structural-traversal)
@@ -51,6 +52,8 @@
    - 7.8 [How to Run `MessageFlowSimulator`](#78-how-to-run-messageflowsimulator)
    - 7.9 [Output Schema Snippet (`message_flow_results.json`)](#79-output-schema-snippet-message_flow_resultsjson)
    - 7.10 [Academic Provenance: Convergent-Validity Research Probe](#710-academic-provenance-convergent-validity-research-probe)
+   - 7.11 [Runtime Engine: Reactive Behaviour, Deployment & Gray Failures (Opt-In)](#711-runtime-engine-reactive-behaviour-deployment--gray-failures-opt-in)
+   - 7.12 [Emulated DDS Testbed, Calibration & Fidelity (Opt-In)](#712-emulated-dds-testbed-calibration--fidelity-opt-in)
 8. [Engine 5: `ChangePropagationSimulator` (Maintainability Reference — Oracle $I_M$)](#8-engine-5-changepropagationsimulator-maintainability-reference--oracle-i_m)
    - 8.1 [Quick Facts](#81-quick-facts)
    - 8.2 [Runtime Failure vs. Development-Time Interface Change](#82-runtime-failure-vs-development-time-interface-change)
@@ -466,6 +469,12 @@ python cli/simulate_graph.py fault-inject \
 > - **Label Noise Ceiling:** Re-running `FaultInjector` across 5 random seeds yields pairwise test-retest rank correlations of **$0.811$–$1.000$ (median $0.982$)**, establishing the ceiling of achievable GNN accuracy.
 > - **Topological Nature of $I^*$:** Disabling QoS scaling entirely recovers component ranking at mean **$\rho = 0.965$** ($0.891$–$0.999$), indicating that $I^*$ is primarily a topological reachability functional with QoS acting at top-$K$ boundaries (Jaccard $0.678$).
 > - **Simulation vs. Static Gate Cost:** Running a full 5-seed `FaultInjector` sweep costs **$0.14$–$7.2\,\text{s}$**, whereas static analysis costs **$0.04$–$82.7\,\text{s}$** (being $11\times$ slower on Enterprise mesh), proving that in-process cascade simulation is computationally cheaper than full static feature extraction.
+
+### 4.8 Opt-In `threshold_cdf` Failure Model
+
+Under the published `failure_model="step"`, a subscriber whose feed loss reaches `propagation_threshold` fails with probability $\min(1, \text{loss}/\theta)\cdot\text{damp}$. That expression is reached only when $\text{loss} \ge \theta$, so the $\min$ is always 1: the probability is just the depth damping (1.0 at wave 0). The loss magnitude past the threshold never matters, and the label has a cliff at $\theta = 0.2$. A surviving subscriber is also redrawn on every later wave, so its odds depend on how long the cascade runs elsewhere. Measured on five core scenarios, I* agrees with its own first wave at $\rho \ge 0.99$ on four of them (0.82 on microservices), and most nodes have zero seed spread.
+
+`failure_model="threshold_cdf"` (CLI `--failure-model threshold_cdf`) gives every subscriber a latent tolerance $\theta_s \sim U(0.1, 0.5)$, drawn once per seed. The subscriber may fail (probability `depth_damp`) once its loss reaches $\theta_s$, and is redrawn only when its loss *increases*. Averaged over seeds, $P(\text{fail}) = F_\theta(\text{loss})\cdot\text{damp}$: the cliff becomes the threshold distribution's CDF, and the seed spread measures threshold uncertainty. The artifact records `labeler_config`. The default remains `step`, so published labels are unchanged (`tests/test_simulation_golden_defaults.py`). See `tests/test_runtime_labels.py` for the graded-vs-cliff check.
 
 ---
 
@@ -1115,6 +1124,111 @@ PYTHONPATH=. python reproduce/convergent_validity.py --scenarios atm_system --du
 > - **Top-$K$ Jaccard = $0.370$** (against $0.111$ expected by chance)
 > 
 > Because this correlation is substantial but distinctly below $I^*$'s test-retest ceiling ($0.811$–$1.000$), it confirms that topological graph rankings reflect real runtime communication dynamics without being redundant with them.
+
+### 7.11 Runtime Engine: Reactive Behaviour, Deployment & Gray Failures (Opt-In)
+
+The published engine (§7.1–7.10) has three structural limits:
+
+- **Publishers ignore their inputs.** A starved relay keeps publishing on schedule, so no fault travels more than one hop. That is why $I_{\text{dyn}}$ reduces in closed form to the rate-weighted first-order expansion (§2.5).
+- **Brokers and hosts are not on the data path**, so faulting them is a no-op.
+- **Permanent crash-stop is the only failure mode.**
+
+On the chain `A → t1 → B → t2 → C`, the published engine gives $I_{\text{dyn}}(A) = 0.50 < I_{\text{dyn}}(B) = 1.00$, because C stays fully fed when the source dies.
+
+The runtime engine, in [`saag/simulation/runtime/`](../saag/simulation/runtime/), lifts all three limits. Every part is an opt-in argument whose default is the published engine. [`tests/test_simulation_golden_defaults.py`](../tests/test_simulation_golden_defaults.py) pins I* and $I_{\text{dyn}}$ bit for bit at the defaults, and the runtime label settings use their own cache key.
+
+| Option (`MessageFlowSimulator`) | Default | What it adds |
+|:---|:---|:---|
+| `behavior_model="reactive"` | `open_loop` | Publication is gated on input freshness by a per-application trigger policy: `periodic`, `all_of`, `any_of` or `k_of_n:K` (degraded emission). The policy comes from the `trigger` attribute, or by default from `app_type`: sensor → periodic; processor/controller → all_of; gateway, service, monitor and actuator → any_of. An input is fresh while its last *delivered* sample (one that met its deadline) is younger than $\max(\text{deadline}, 3/f_t)$. Topics nobody publishes and self-published topics are never required inputs. A fault now stalls downstream relays; the record reports `stalled_apps`, `time_to_stall_s` and `cascade_hops`. |
+| `rng_streams="per_process"` | `shared` | One RNG stream per publisher/subscriber process (common random numbers). |
+| `estimator="paired"` | `windows` | Adds a no-fault baseline on the same streams and windows, cached per `(seed, fault_time)`. It reports `i_dyn_paired` = baseline-post − fault-post delivery. With per-process streams, a fault that touches nothing scores exactly 0.0. |
+| `deployment_model="stations"` | `none` | Brokers become service stations on ROUTES. On a broker outage, traffic fails over to the lowest-id live broker after a $\max(1, 3/f)$ s lease. Co-located applications share their host's CPU (`cpu_cores`, default one core per resident). Host outages kill residents (`replica_aware` respected). Brokers and hosts become labelled. |
+| `network_gating=True` | off | With `stations`, CONNECTS_TO reachability gates delivery, so host outages and `link_flap` partition the network. Off by default, as in `FailureSimulator` and `FaultInjector`: the corpus's CONNECTS_TO is a sparse host mesh, not a complete topology. |
+| `hot_standby=True` | off | Components declaring `hotstandby` come back `failover_delay_s` after a crash. |
+| `faults=[FaultSpec, …]` | — | The fault library below; the first entry is the reported fault. |
+| `workload_model="mmpp"` | `declared` | Two-state Markov-modulated Poisson arrivals with the declared mean rate (`burst_ratio`, `burst_fraction`, `mean_burst_s`). No corpus topic declares bursts today. `runtime.workload.apply_zipf_rates` is a sensitivity arm for the three flat-rate scenarios. |
+| `record_events=True` | off | Per-message trace in the calibrator's OpenTelemetry-shaped format (`result.export_events(path)`). |
+| `telemetry_profile=…` | — | Measured rates, service-time distributions and trigger policies override the declared ones (§7.12). |
+
+**Fault library** (`saag.simulation.runtime.faults.RuntimeFaultMode`). This enum is separate from `FailureSimulator`'s `FailureMode`, so the Validate oracle's semantics are unchanged.
+
+| Mode | Effect | Parameters |
+|:---|:---|:---|
+| `crash` | Permanent crash-stop; a host takes its residents with it | — |
+| `transient_crash` | Crash, then restart after `duration_s`; subscribers resume | `storm_copies` on restart |
+| `freeze` | Stops serving and emitting; queues keep filling (GC pause) | `duration_s` |
+| `slowdown` | Service time × k; on a host, every resident; on a broker, its station | `k`, or `k_mu`/`k_sigma` (log-normal) |
+| `omission` | Drops each emission with probability p | `p` |
+| `babbling` | Publishes at k × its rate | `k` |
+| `buffer_leak` | Reader queue capacity shrinks by β slots/s | `beta` |
+| `redelivery_storm` | Re-sends retained history `copies` times (the pub-sub retry storm) | `copies` |
+| `link_flap` | Gilbert-Elliott good/bad on CONNECTS_TO link `a\|b`; bad = cut | `mean_good_s`, `mean_bad_s` |
+
+For a bounded primary fault, the record also reports `time_to_recover_s`: the time from the end of the fault until delivery regains 95% of its pre-fault rate, measured on a 1 s timeline. It also reports the controller's `runtime_events` log.
+
+**Runtime labels** (`saag-simulate runtime-sweep`, [`runtime/labels.py`](../saag/simulation/runtime/labels.py)). Every candidate (Applications, plus Brokers and Nodes under `stations`) is faulted under the runtime oracle settings, which are reactive, stations, per-process streams and paired. The sweep writes `runtime_labels.json` with these labels:
+
+- `i_delivery`: paired volume-weighted delivery loss.
+- `i_delivery_consumer`: the same, averaged per subscriber.
+- `i_flow`: criticality-weighted end-to-end loss at the sinks. A faulted sink loses everything, so terminal consumers are not harmless as they are under I*.
+- `i_timeliness`: signed change in the deadline-miss share; it is never clamped, because contention relief is real.
+- `i_recovery`: recovery time, for bounded faults only.
+
+Under the Order-$k$ Reference Criterion (§2.5), each label ships with its own truncation:
+
+- `ref_delivery_first_order`: Eq. 7, generalised to brokers and hosts.
+- `ref_flow_reach`: full-propagation sink reach. It saturates on dense systems and is reported but not binding.
+- `ref_flow_policy`: a deterministic stall fixpoint under the same trigger policies, with no timing, staleness or queueing. This is the reference `i_flow` must beat.
+
+A check of the identity: with `behavior_model="open_loop"`, paired `i_delivery` matches `ref_delivery_first_order` at $\rho = 0.998$ on `atm_system`.
+
+> [!WARNING]
+> **Exploratory, not results.** The numbers below are first measurements on two scenarios, two seeds and 30 s runs, taken while building the engine. Any comparison that will be reported must be pre-registered first.
+> - `i_flow` vs `ref_flow_policy`: $\rho = 0.86$ (atm), $0.80$ (microservices).
+> - `i_flow` vs I*: $0.22$ (atm), $-0.28$ (microservices).
+> - `i_delivery` vs its first-order reference: $0.87$ / $0.85$.
+> - No application has $i_{\text{flow}} = 0$, against 5 (atm) and 13 (microservices) with $I^* = 0$.
+>
+> **Fault-free cost of the reactive model.** Queueing jitter at $\rho = 0.65$ occasionally opens delivery gaps wider than a staleness window, so relays flap. Fault-free publication is 0–5.5% below open-loop on the five scenarios checked. Only stalls lasting at least one staleness window (and ≥ 1 s) at the end of a run count as `stalled_apps`.
+
+### 7.12 Emulated DDS Testbed, Calibration & Fidelity (Opt-In)
+
+Every oracle above is scored against something the framework computes. [`saag/testbed/`](../saag/testbed/) produces *observed* behaviour to compare against: the scenario runs as a real pub-sub system, and the same `FaultSpec`s are injected into it.
+
+- **Deployment plan** ([`testbed/deployment.py`](../saag/testbed/deployment.py)). Records hosts and their residents, each topic's DDS QoS, and each application's trigger policy, required inputs, staleness windows and calibrated service time. The policy and staleness functions are the same ones the reactive model uses, so a fidelity gap reflects timing, queueing and transport, not the behavioural model.
+- **Runtime** ([`testbed/runtime.py`](../saag/testbed/runtime.py)). Stub applications run one publisher thread per output, one worker per application (the shared station), bounded per-topic queues with the corpus overflow policy, and deadline checks. A **Broker** is a relay process: writers publish to an `ingress` partition and the routing broker republishes to `egress`. The relay with the lowest id and a live heartbeat routes. A **multi-hosted application** runs one instance per host. The lowest-id instance with a live heartbeat is active; the others are warm standbys that track input freshness. A host outage therefore moves the application rather than killing it, which is why the fidelity comparison simulates with `replica_aware=True`. Each takeover is logged as a `saag.state` event. Telemetry is line-buffered, so a `docker kill` does not lose a host's log.
+- **Transport.** [`testbed/dds.py`](../saag/testbed/dds.py) uses Cyclone DDS (extra `testbed`) and maps reliability, durability, KEEP_LAST depth, deadline and transport priority. Samples are taken by one Python poller blocked on a WaitSet, never by listener callbacks: a listener runs Python on Cyclone's receive thread while that thread holds the reader lock, and with every component writing and reading the heartbeat topic in one participant, that deadlocked whole hosts. Instance-state notifications (`InvalidSample`, for example when a remote writer dies) are skipped. `LocalTransport` runs the whole scenario in-process without containers.
+- **Chaos** ([`testbed/chaos.py`](../saag/testbed/chaos.py)). Host faults become `docker kill/start/pause/update`. Application faults become control files the agent polls. `link_flap` becomes `tc netem`, an approximation that cuts all of one endpoint's traffic. `buffer_leak` and `redelivery_storm` are reported as unsupported.
+- **Calibration** ([`saag/simulation/calibration.py`](../saag/simulation/calibration.py)). `TelemetryCalibrator` fits topic rates and per-application service-time distributions on the pre-fault steady state. It infers trigger policies from the app's realised emission rate in each input state (all fresh / some stale / all stale), relative to its active rate. The windows come from median inter-event gaps, and one window after each replica takeover is skipped. The policy is left unset when the trace never shows a discriminating outage, or when the share is ambiguous (between 0.2 and 0.8). It never writes `edge_failure_correlation` (a cascade *probability* in `FailureSimulator`, not a drop rate) or starvation bounds.
+- **Fidelity** ([`saag/validation/fidelity.py`](../saag/validation/fidelity.py)). Compares steady state (topic rate, per-reader delivery rate, p50/p95 latency, deadline-miss share against declared tolerances) and fault response (impact rank agreement, stall-set Jaccard). It is a Tier-2 report, never a gate.
+
+```bash
+saag-simulate testbed build --input data/scenarios/atm_system.json --output output/testbed/atm --duration 60
+saag-simulate testbed run --output output/testbed/atm --duration 60 --faults faults.json --mode local
+saag-simulate testbed calibrate --output output/testbed/atm
+saag-simulate testbed fidelity --output output/testbed/atm --calibrated
+```
+
+`--mode local` needs nothing beyond the Python environment. `--mode docker` builds an image that downloads `python:3.11-slim` and `cyclonedds==11.0.1`, and runs one container per host with `NET_ADMIN`. The testbed directory is its own build context: `build` copies the `saag` package into it, so the repository is never shipped to the Docker daemon. (0.10.x ships no wheels and needs the Cyclone C library to build.) The simulator side of the fidelity comparison uses the default `network_gating=False`, matching the testbed's single bridge network.
+
+**Docker validation on `tiny_system`** (2026-10-23; 4 containers, 12 applications, 2 broker relays, 1 Hz topics; declared parameters):
+
+| Run | Topic rate (median rel. err.) | Per-reader delivery (median) | Latency p50 / p95 (median) | Stall-set Jaccard |
+|:---|:---|:---|:---|:---|
+| Fault-free, 40 s | 0.000 | 0.000 | 0.14 / 0.11 | — |
+| Host N1 crash at 20 s (`docker kill`), 50 s | 0.000 | 0.059 | 0.40 / 0.14 | 1.0 |
+| Broker B0 crash at 20 s (failover to B1), 50 s | 0.000 | 0.059 | 0.34 / 0.18 | 1.0 |
+
+Calibration reproduces the stall sets and trims p50 latency error by 0.04–0.05. It has not yet been shown to help on p95 (0.13–0.29). Inferred policies agree with the declared ones wherever they are identifiable; the rest abstain. Latency is the weakest match: p50 meets its 25% tolerance on only 1–3 of 5 topics in the faulted runs. With 1 Hz topics, each 20 s window holds only about 20 samples per topic. The numbers come from single runs and are a smoke test of the loop, not an evaluation.
+
+The first Docker runs found four defects that the in-process tests could not:
+
+1. Multi-hosted components were placed only on their first host.
+2. Telemetry was lost on `docker kill`.
+3. The listener deadlock in the transport.
+4. Runtime network gating was on by default, which partitioned hosts the sparse corpus mesh never meant to isolate.
+
+Each now has a regression test, or is pinned by the Docker results above.
 
 ---
 
