@@ -20,9 +20,22 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from saag.simulation.calibration import make_event
+
 from .runtime import AppRuntime, BrokerRelay, Control, LocalTransport, TelemetrySink
 
 CONTROL_POLL_S = 0.1
+#: How often agent-level DDS status counts are written to the trace.
+STATUS_PERIOD_S = 1.0
+
+
+def _emit_status(parts: Dict[str, object], sink: TelemetrySink) -> None:
+    now = time.time()
+    for part in parts.values():
+        events = getattr(part, "status_events", None)
+        if events is not None:
+            for ev in events(now):
+                sink.emit(ev)
 
 
 def run_host(plan: Dict, host: str, transport, sink: TelemetrySink, duration_s: float,
@@ -40,8 +53,17 @@ def run_host(plan: Dict, host: str, transport, sink: TelemetrySink, duration_s: 
         p.start()
     end = time.time() + duration_s
     stamps: Dict[str, tuple] = {}
+    if getattr(transport, "status_callback", "absent") is None:
+        # DDS transport: report the middleware's own status counts too.
+        transport.status_callback = lambda kind, owner, topic, name, count: sink.emit(make_event(
+            time.time(), "saag.status", owner.partition("@")[0], topic, status=name,
+            count=count, entity=kind, source="cyclone", instance=owner))
+    next_status = time.time() + STATUS_PERIOD_S
     try:
         while time.time() < end:
+            if time.time() >= next_status:
+                next_status += STATUS_PERIOD_S
+                _emit_status(parts, sink)
             if control_dir is not None:
                 for name, part in parts.items():
                     # Component-level control applies to every instance;
@@ -57,6 +79,7 @@ def run_host(plan: Dict, host: str, transport, sink: TelemetrySink, duration_s: 
                         part.control = Control.from_dict(state)
             time.sleep(CONTROL_POLL_S)
     finally:
+        _emit_status(parts, sink)
         for p in parts.values():
             p.shutdown()
         transport.close()

@@ -18,7 +18,11 @@ system forward in time, modelling:
                            BEFORE get() to avoid put-back  [FIX: BUG-MFS-4]
   • QoS enforcement       – RELIABLE / BEST_EFFORT; deadline_ms checked on
                            end-to-end latency (after subscriber processing)
-                           [FIX: BUG-MFS-5]
+                           and late samples dropped [FIX: BUG-MFS-5]. Note
+                           this is LIFESPAN-like semantics, not DDS DEADLINE
+                           (a period contract that drops nothing);
+                           qos_semantics="dds" implements the DDS meaning
+                           (runtime/dds_status.py).
   • Fault injection       – node added to failed_nodes at fault_time; cascade
                            info annotated using graph topology
   • Pre/post-fault rates  – per-topic published counts tracked in publisher to
@@ -153,7 +157,9 @@ class QoSProfile:
 #:                differ from the others in *policy*, not in how busy the system
 #:                is, or the ablation confounds "QoS does nothing" with "nothing
 #:                was ever contended".
-#: ``contracts``  queue depth from history_depth, deadlines enforced.
+#: ``contracts``  queue depth from history_depth, deadlines enforced (under the
+#:                default ``qos_semantics="engine"`` that means late samples are
+#:                dropped; under ``"dds"`` deadline misses are counted instead).
 #: ``recovery``   durability replay only (Stage 4).
 #: ``full``       everything, plus priority-ordered service (Stage 3).
 #: ``legacy``     the engine's historical QoS *policy*: flat queue size,
@@ -550,6 +556,11 @@ class SubscriberQueue:
         self._store: simpy.Store = simpy.Store(env, capacity=qos.queue_size)
         #: Effective capacity below the declared one, set by a BUFFER_LEAK fault.
         self.capacity_override: Optional[int] = None
+        #: DDS status recorder (``dds_status``), and whether a full BEST_EFFORT
+        #: queue replaces its oldest sample (DDS KEEP_LAST, ``qos_semantics="dds"``)
+        #: instead of dropping the new one.
+        self.status: Any = None
+        self.keep_last_replace = False
 
         # Saturation tracking: depth integral and peak occupancy
         self._last_depth_change_time = 0.0
@@ -643,19 +654,25 @@ class SubscriberQueue:
         cap = self.capacity
         if self.depth >= cap:
             stats.total_dropped_queue_full += 1
-            if self.qos.reliability == "BEST_EFFORT":
+            if self.qos.reliability == "BEST_EFFORT" and not self.keep_last_replace:
                 stats.total_dropped_best_effort += 1
                 self._record_drop(stats)
+                if self.status is not None:
+                    self.status.rejected(self.topic_id, self.subscriber_id, self.env.now)
                 return False
-            # RELIABLE: head-drop oldest to make room. A loop only because a
-            # leaking buffer can shrink below the current depth; at the declared
-            # capacity it pops exactly one.
+            # RELIABLE (or DDS KEEP_LAST): head-drop oldest to make room. A loop
+            # only because a leaking buffer can shrink below the current depth;
+            # at the declared capacity it pops exactly one.
             while self._store.items and self.depth >= cap:
                 self._store.items.pop(0)
                 self._record_drop(stats)
                 self._update_depth_area()
+                if self.status is not None:
+                    self.status.replaced(self.topic_id, self.subscriber_id, self.env.now)
         self._store.put(msg)
         self._update_depth_area()
+        if self.status is not None:
+            self.status.reader_arrival(self.topic_id, self.subscriber_id, self.env.now)
         return True
 
 
@@ -692,6 +709,8 @@ class TopicFanout:
         #: `stats.published_post` (which includes what a silenced publisher would
         #: have sent). Their difference is what the outage cost.
         self._emitted_post = 0
+        #: ``compat(writer, reader) -> bool`` under ``qos_semantics="dds"``.
+        self.compat: Optional[Any] = None
 
     def register(
         self,
@@ -738,7 +757,12 @@ class TopicFanout:
         for sub_id, sq in self._queues.items():
             if sub_id in failed_nodes:
                 continue
+            # DDS RxO: an incompatible (writer, reader) pair is never matched.
+            if self.compat is not None and not self.compat(msg.publisher_id, sub_id):
+                continue
             if gate is not None and not gate(sub_id):
+                if sq.status is not None:
+                    sq.status.lost(self.topic_id, sub_id, sq.env.now)
                 continue
             if sq._try_put(msg, self.stats):
                 n_queued += 1
@@ -894,6 +918,7 @@ def _publisher_process(
     runtime: Any = None,
     workload: Any = None,
     recorder: Optional[List[Dict[str, Any]]] = None,
+    status: Any = None,
 ) -> Generator:
     """
     Publisher SimPy process.
@@ -982,6 +1007,8 @@ def _publisher_process(
             created_at=emit_time,
             payload_size_bytes=payload_size_bytes,
         )
+        if status is not None:
+            status.writer_emit(app_id, topic_id, emit_time)
         if recorder is not None:
             recorder.append(make_event(emit_time, "saag.publish", app_id, topic_id,
                                        **{"messaging.message.id": msg.msg_id}))
@@ -1018,6 +1045,7 @@ def _subscriber_process(
     behavior: Any = None,
     runtime: Any = None,
     recorder: Optional[List[Dict[str, Any]]] = None,
+    drop_late: bool = True,
 ) -> Generator:
     """
     Subscriber SimPy process.
@@ -1103,8 +1131,11 @@ def _subscriber_process(
                 sub_stats.missed_post_fault += 1
             continue
 
-        # Deadline check (DDS deadline = end-to-end)
-        if qos.deadline_ms is not None and e2e_latency_ms > qos.deadline_ms:
+        # Latency drop on deadline_ms -- the published engine's rule. This is
+        # LIFESPAN-like semantics, not DDS DEADLINE (a period contract that
+        # drops nothing); under qos_semantics="dds" (drop_late False) deadlines
+        # are counted as requested_deadline_missed instead (runtime/dds_status).
+        if drop_late and qos.deadline_ms is not None and e2e_latency_ms > qos.deadline_ms:
             sub_stats.deadline_violations_per_topic[received_key] += 1
             topic_stats.total_dropped_deadline += 1
             if window == "pre":
@@ -1352,6 +1383,21 @@ class MessageFlowSimulator:
         service stations on the data path with failover, co-located
         applications share their host's CPU, and hosts and brokers are
         labelled.
+    qos_semantics : str
+        ``"engine"`` (default, published): ``deadline_ms`` drops samples whose
+        end-to-end latency exceeds it (LIFESPAN-like), a full BEST_EFFORT queue
+        drops the new sample, and offered/requested QoS are never matched.
+        ``"dds"``: DDS semantics (saag/simulation/runtime/dds_status.py) --
+        DEADLINE is a period contract that drops nothing, KEEP_LAST replaces the
+        oldest sample whatever the reliability, and request-vs-offered
+        incompatible (writer, reader) pairs do not communicate.
+    dds_status : bool
+        Count the DDS standard statuses (requested/offered deadline missed,
+        sample lost/rejected, liveliness not-alive, incompatible QoS, reader
+        cache replacement/peak) into ``MessageFlowResult.dds_status``. Pure
+        observation; implied by ``qos_semantics="dds"``.
+    liveliness_lease_s : float
+        Lease after which a dead writer counts as not alive. Default 1.0.
     network_gating : bool
         Under ``deployment_model="stations"``, count a delivery only while
         CONNECTS_TO still connects publisher, routing broker and subscriber,
@@ -1422,8 +1468,18 @@ class MessageFlowSimulator:
         record_events: bool = False,
         telemetry_profile: Optional[Any] = None,
         network_gating: bool = False,
+        qos_semantics: str = "engine",
+        dds_status: bool = False,
+        liveliness_lease_s: float = 1.0,
     ) -> None:
         _require_simpy()
+        from .runtime.dds_status import QOS_SEMANTICS
+        if qos_semantics not in QOS_SEMANTICS:
+            raise ValueError(f"qos_semantics must be one of {QOS_SEMANTICS}, got {qos_semantics!r}")
+        self.qos_semantics = qos_semantics
+        #: Status counting is pure observation; the DDS arm always reports it.
+        self.dds_status = dds_status or qos_semantics == "dds"
+        self.liveliness_lease_s = float(liveliness_lease_s)
         from .runtime.faults import DEPLOYMENT_MODELS, FaultSpec
         from .runtime.workload import WORKLOAD_MODELS
         for name, value, allowed in (
@@ -2070,6 +2126,9 @@ class MessageFlowSimulator:
             return random.Random(derive_seed(self.seed, f"{kind}|{app}|{topic}"))
 
         recorder: Optional[List[Dict[str, Any]]] = [] if self.record_events else None
+        status = (self._build_status(edges, pub_edges, sub_edges, fanouts, topic_qos,
+                                     sub_queues, effective_qos, fault_time)
+                  if self.dds_status else None)
         runtime = None
         workload = None
         if self._runtime_requested:
@@ -2079,6 +2138,7 @@ class MessageFlowSimulator:
                 pub_edges, sub_edges, self.faults or [],
                 primary_target=self.fault_node or self._baseline_primary,
             )
+            runtime.status = status
             if self.workload_model == "mmpp":
                 from .runtime.workload import MMPP
                 workload = MMPP(self.burst_ratio, self.burst_fraction, self.mean_burst_s)
@@ -2117,6 +2177,7 @@ class MessageFlowSimulator:
                 runtime=runtime,
                 workload=workload,
                 recorder=recorder,
+                status=status,
             ))
 
         for src, tgt, data in sub_edges:
@@ -2153,6 +2214,7 @@ class MessageFlowSimulator:
                 behavior=behavior,
                 runtime=runtime,
                 recorder=recorder,
+                drop_late=self.qos_semantics == "engine",
             ))
 
         fault_event_record: Optional[FaultEventRecord] = None
@@ -2168,6 +2230,8 @@ class MessageFlowSimulator:
                 )
                 if runtime is None:
                     failed_nodes.add(self.fault_node)
+                    if status is not None:
+                        status.down(self.fault_node, env.now)
                 fault_event_record = FaultEventRecord(
                     fault_time=env.now,
                     faulted_node_id=self.fault_node,
@@ -2223,6 +2287,13 @@ class MessageFlowSimulator:
         )
         env.run(until=self.duration)
         logger.info("Simulation complete.")
+
+        dds_status = status.finalise(self.duration, sub_queues) if status is not None else None
+        if dds_status is not None and recorder is not None:
+            from .runtime.dds_status import status_snapshot_events
+            if fault_time is not None:
+                recorder.extend(status_snapshot_events(dds_status, fault_time, "pre"))
+            recorder.extend(status_snapshot_events(dds_status, self.duration, "total"))
 
         total_delivered = sum(ts.total_delivered for ts in topic_stats.values())
         # A message is "fully delivered" once every subscriber receives it, so
@@ -2345,7 +2416,61 @@ class MessageFlowSimulator:
             golden_signals=overall_signals,
             runtime_config=self._runtime_config(),
             events=recorder,
+            dds_status=dds_status,
         )
+
+    def _build_status(self, edges, pub_edges, sub_edges, fanouts, topic_qos,
+                      sub_queues, effective_qos, fault_time):
+        """Wire the DDS status recorder, and (under ``dds``) KEEP_LAST and RxO."""
+        from .runtime.dds_status import DdsStatusRecorder, entity_key, rxo_compatible
+
+        if fault_time is None:
+            segments = [(self.warmup_s, math.inf, "post")]
+        else:
+            segments = [(self.warmup_s, fault_time - self.guard_band_s, "pre"),
+                        (fault_time + self.guard_band_s, math.inf, "post")]
+        pubs: Dict[str, List[str]] = defaultdict(list)
+        for src, tgt, _ in pub_edges:
+            pubs[tgt].append(src)
+        routers: Dict[str, List[str]] = defaultdict(list)
+        for src, tgt, _ in edges.get("ROUTES", []):
+            if tgt in fanouts:
+                routers[tgt].append(src)
+        readers: Dict[str, List[str]] = defaultdict(list)
+        for src, tgt, _ in sub_edges:
+            readers[tgt].append(src)
+        hosts: Dict[str, List[str]] = defaultdict(list)
+        for src, tgt, _ in edges.get("RUNS_ON", []):
+            hosts[src].append(tgt)
+        # A reader of a brokered topic is matched with the relay, not the
+        # publishers -- as in the testbed, where the broker republishes.
+        matched = {t: sorted(routers[t]) if routers.get(t) else sorted(pubs.get(t, []))
+                   for t in fanouts}
+        rec = DdsStatusRecorder(segments, self.liveliness_lease_s, matched, readers,
+                                {k: sorted(v) for k, v in hosts.items()})
+        dds = self.qos_semantics == "dds"
+        for (topic, sub), sq in sub_queues.items():
+            sq.status = rec
+            sq.keep_last_replace = dds
+            rec.add_deadline(entity_key("reader", topic, sub), effective_qos[(topic, sub)].deadline_ms)
+        offered: Dict[Tuple[str, str], QoSProfile] = {}
+        for src, tgt, data in pub_edges:
+            offered[(src, tgt)] = _apply_qos_mode(
+                _merge_qos(topic_qos[tgt], _extract_qos(data, self.default_queue_size)),
+                self.qos_mode, self.default_queue_size)
+            rec.add_deadline(entity_key("writer", tgt, src), offered[(src, tgt)].deadline_ms)
+        if dds:
+            blocked: Set[Tuple[str, str, str]] = set()
+            for (pub, topic), off in sorted(offered.items()):
+                for sub in readers.get(topic, []):
+                    ok, failed = rxo_compatible(off, effective_qos[(topic, sub)])
+                    if not ok:
+                        blocked.add((topic, pub, sub))
+                        rec.mark_incompatible(topic, sub, pub, failed)
+            for topic, fo in fanouts.items():
+                if any(b[0] == topic for b in blocked):
+                    fo.compat = (lambda t: lambda w, r: (t, w, r) not in blocked)(topic)
+        return rec
 
     @property
     def _runtime_requested(self) -> bool:
@@ -2361,7 +2486,8 @@ class MessageFlowSimulator:
         defaults = {"behavior_model": "open_loop", "rng_streams": "shared",
                     "estimator": "windows", "deployment_model": "none",
                     "replica_aware": False, "hot_standby": False,
-                    "workload_model": "declared", "network_gating": False}
+                    "workload_model": "declared", "network_gating": False,
+                    "qos_semantics": "engine", "dds_status": False}
         out = {k: getattr(self, k) for k, v in defaults.items() if getattr(self, k) != v}
         if self.faults:
             out["faults"] = [f.to_dict() for f in self.faults]

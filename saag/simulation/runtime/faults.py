@@ -195,6 +195,8 @@ class RuntimeController:
         self._thaw_events: Dict[str, Any] = {}
         self.ever_failed: Set[str] = set()
         self.lost_at_broker = 0
+        #: DDS status recorder, set by the simulator when ``dds_status`` is on.
+        self.status: Any = None
         self.events: List[Dict[str, Any]] = []
 
         # ── Timeline (recovery measurement) ─────────────────────────────────
@@ -356,6 +358,8 @@ class RuntimeController:
             return
         self.failed.add(comp)
         self.ever_failed.add(comp)
+        if self.status is not None:
+            self.status.down(comp, self.env.now)
         self._recovery_events.setdefault(comp, self.env.event())
         self._log("down", comp, cause)
         if self.node_type.get(comp) in NETWORK_TYPES:
@@ -377,6 +381,8 @@ class RuntimeController:
             return
         self.failed.discard(comp)
         self._log("up", comp, cause)
+        if self.status is not None:
+            self.status.up(comp, self.env.now)
         ev = self._recovery_events.pop(comp, None)
         if ev is not None and not ev.triggered:
             ev.succeed()

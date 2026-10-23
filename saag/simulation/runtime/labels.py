@@ -20,7 +20,11 @@ Labels (each a mean and std over seeds)
                          sink that is itself faulted loses everything, so --
                          unlike I*(v) -- terminal consumers are not harmless.
 ``i_timeliness``         signed change in the deadline-miss share of delivered
-                         samples. Negative values are real: a fault can relieve
+                         samples. Under ``qos_semantics="dds"`` -- where a
+                         deadline is a period contract that drops nothing --
+                         it is instead the paired increase in the DDS
+                         ``requested_deadline_missed`` rate per surviving
+                         reader (misses per reader-second). Negative values are real: a fault can relieve
                          contention. Never clamped.
 ``i_recovery``           seconds from the end of a bounded fault until delivery
                          regained 95% of its pre-fault rate (bounded faults only).
@@ -215,6 +219,21 @@ def _miss_share(result) -> Optional[float]:
     return viol / (viol + got) if (viol + got) else None
 
 
+def _deadline_rate(result, target: str, span: float) -> float:
+    """Post-window DDS reader deadline misses per surviving reader per second.
+
+    *span* is the faulted run's post window: the paired baseline has no fault
+    event of its own, but it is bucketed on the same fault time.
+    """
+    status = result.dds_status or {}
+    readers = [k for k, e in status.get("entities", {}).items()
+               if e["kind"] == "reader" and e["component"] != target]
+    if not readers or span <= 0:
+        return 0.0
+    misses = status.get("statuses", {}).get("requested_deadline_missed", {})
+    return sum(misses.get(k, {}).get("post", 0) for k in readers) / (len(readers) * span)
+
+
 def labels_from_run(topo: _Topology, target: str, fault_run, baseline) -> Dict[str, Optional[float]]:
     fe = fault_run.fault_event
     consumer = []
@@ -233,12 +252,17 @@ def labels_from_run(topo: _Topology, target: str, fault_run, baseline) -> Dict[s
         lost = 1.0 if app == target else 1.0 - _received_post(fault_run, app) / base
         flow_num += w * lost
         flow_den += w
-    miss_f, miss_b = _miss_share(fault_run), _miss_share(baseline)
+    if (fault_run.runtime_config or {}).get("qos_semantics") == "dds":
+        span = fe.post_window_s
+        timeliness = _deadline_rate(fault_run, target, span) - _deadline_rate(baseline, target, span)
+    else:
+        miss_f, miss_b = _miss_share(fault_run), _miss_share(baseline)
+        timeliness = (miss_f - miss_b) if miss_f is not None and miss_b is not None else None
     return {
         "i_delivery": fe.i_dyn_paired,
         "i_delivery_consumer": statistics.fmean(consumer) if consumer else 0.0,
         "i_flow": flow_num / flow_den if flow_den else 0.0,
-        "i_timeliness": (miss_f - miss_b) if miss_f is not None and miss_b is not None else None,
+        "i_timeliness": timeliness,
         "i_recovery": fe.time_to_recover_s,
     }
 

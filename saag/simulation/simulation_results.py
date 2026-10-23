@@ -708,6 +708,10 @@ class MessageFlowResult:
     #: `saag.simulation.calibration`. Not part of `to_dict()`: export it with
     #: `export_events` instead.
     events: Optional[List[Dict[str, Any]]] = None
+    #: DDS standard statuses (``dds_status`` / ``qos_semantics="dds"``), see
+    #: saag/simulation/runtime/dds_status.py. None for a default run, and then
+    #: omitted from `to_dict()`.
+    dds_status: Optional[Dict[str, Any]] = None
 
     def export_events(self, path: Path) -> int:
         """Write the event log as OpenTelemetry-shaped JSON lines; returns the count."""
@@ -754,6 +758,8 @@ class MessageFlowResult:
         }
         if self.runtime_config:
             d["runtime_config"] = self.runtime_config
+        if self.dds_status is not None:
+            d["dds_status"] = self.dds_status
         return d
 
     def save(self, path: Path) -> None:

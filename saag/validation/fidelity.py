@@ -169,3 +169,89 @@ def stalled_in_trace(trace: TelemetryTrace, after: float, min_silence_s: float =
         if last[a] < trace.end_s - window:
             out.add(a)
     return out
+
+
+def compare_dds_status(
+    simulated: TelemetryTrace, observed: TelemetryTrace, split_at: Optional[float] = None,
+    end_margin_s: float = 1.5, dead_instances: Iterable[str] = (),
+    restrict_to_simulated: bool = True,
+) -> Dict[str, Any]:
+    """Compare DDS standard status counts (saag.simulation.runtime.dds_status).
+
+    For each status: the entities where it fired on each side and their
+    Jaccard, and per-entity count error over the common entities -- for the
+    whole run and, when *split_at* (the first fault) is given, for the window
+    after it. Counts are taken *end_margin_s* before each trace's end, so the
+    shutdown of the testbed's own processes (writers going away as each
+    container exits) is not read as an outage. Gauges skip *dead_instances*
+    (components or ``"app@host"`` instances that died during the run): their
+    last report is a stale pre-crash value. Counters keep them -- a dead
+    entity's count up to its death is valid history.
+
+    With *restrict_to_simulated* (default) observed entities of components the
+    simulator does not model as DDS endpoints -- the testbed's broker relays,
+    whose ingress readers and egress writers exist only there -- are left out,
+    and their number is reported, so an unmodelled entity does not read as a
+    disagreement.
+    """
+    from saag.simulation.runtime.dds_status import STATUSES
+
+    dead = set(dead_instances)
+
+    def counts(tr: TelemetryTrace, t: Optional[float]) -> Dict[str, Dict[str, int]]:
+        out = tr.status_counts(until=t)
+        live = tr.status_counts(until=t, exclude_instances=dead)
+        for status, (_, kind, _) in STATUSES.items():
+            if kind == "gauge" and status in out:
+                out[status] = live.get(status, {})
+        return out
+
+    # The simulator has no shutdown to exclude and reports its totals at the end.
+    s_end, o_end = counts(simulated, None), counts(observed, observed.end_s - end_margin_s)
+    s_pre = counts(simulated, split_at) if split_at is not None else {}
+    o_pre = counts(observed, split_at) if split_at is not None else {}
+    excluded: Set[str] = set()
+    if restrict_to_simulated:
+        modelled = {k.split("|", 2)[2] for by_key in s_end.values() for k in by_key}
+
+        def scope(c: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
+            out = {}
+            for status, by_key in c.items():
+                keep = {k: v for k, v in by_key.items() if k.split("|", 2)[2] in modelled}
+                excluded.update(set(by_key) - set(keep))
+                out[status] = keep
+            return out
+        o_end, o_pre = scope(o_end), scope(o_pre)
+    report: Dict[str, Any] = {"excluded_observed_entities": 0, "statuses": {},
+                              "only_in_simulation": sorted(set(s_end) - set(o_end)),
+                              "only_observed": sorted(set(o_end) - set(s_end))}
+    for status in sorted(set(s_end) | set(o_end)):
+        _, kind, alias = STATUSES.get(status, ("?", "counter", None))
+
+        def window(end, pre):
+            if split_at is None or kind == "gauge":
+                return dict(end.get(status, {}))
+            p = pre.get(status, {})
+            return {k: v - p.get(k, 0) for k, v in end.get(status, {}).items()}
+
+        entry: Dict[str, Any] = {"rti_alias": alias, "kind": kind}
+        for label, (sv, ov) in {"run": (s_end.get(status, {}), o_end.get(status, {})),
+                                "after_split": (window(s_end, s_pre), window(o_end, o_pre))}.items():
+            if label == "after_split" and split_at is None:
+                continue
+            fired_s = {k for k, v in sv.items() if v}
+            fired_o = {k for k, v in ov.items() if v}
+            union = fired_s | fired_o
+            common = sorted(fired_s & fired_o)
+            errs = [abs(sv[k] - ov[k]) / ov[k] for k in common if ov[k]]
+            entry[label] = {
+                "fired_simulated": len(fired_s), "fired_observed": len(fired_o),
+                "fired_jaccard": (len(fired_s & fired_o) / len(union)) if union else None,
+                "median_rel_error_common": statistics.median(errs) if errs else None,
+                "only_simulated": sorted(fired_s - fired_o)[:10],
+                "only_observed": sorted(fired_o - fired_s)[:10],
+            }
+        report["statuses"][status] = entry
+    report["excluded_observed_entities"] = len(excluded)
+    return report
+

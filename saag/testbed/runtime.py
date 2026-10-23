@@ -29,13 +29,14 @@ import json
 import random
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
 
 from saag.core.models import QoSPolicy
 from saag.simulation._stats import derive_seed
+from saag.simulation.runtime.dds_status import DeadlineMonitor
 from saag.simulation.calibration import make_event
 
 INGRESS, EGRESS, DIRECT = "ingress", "egress", "direct"
@@ -47,9 +48,12 @@ DEFAULT_QUEUE = 100
 
 
 class Transport(Protocol):
-    def writer(self, topic: str, partition: str, qos: Mapping[str, Any]) -> Callable[[Dict[str, Any]], None]: ...
+    """``owner`` names the component an entity belongs to, for status reporting."""
+
+    def writer(self, topic: str, partition: str, qos: Mapping[str, Any],
+               owner: Optional[str] = None) -> Callable[[Dict[str, Any]], None]: ...
     def subscribe(self, topic: str, partition: str, qos: Mapping[str, Any],
-                  callback: Callable[[Dict[str, Any]], None]) -> None: ...
+                  callback: Callable[[Dict[str, Any]], None], owner: Optional[str] = None) -> None: ...
     def close(self) -> None: ...
 
 
@@ -60,7 +64,7 @@ class LocalTransport:
         self._subs: Dict[Tuple[str, str], List[Callable]] = {}
         self._lock = threading.Lock()
 
-    def writer(self, topic, partition, qos):
+    def writer(self, topic, partition, qos, owner=None):
         key = (topic, partition)
 
         def send(sample):
@@ -70,7 +74,7 @@ class LocalTransport:
                 cb(dict(sample))
         return send
 
-    def subscribe(self, topic, partition, qos, callback):
+    def subscribe(self, topic, partition, qos, callback, owner=None):
         with self._lock:
             self._subs.setdefault((topic, partition), []).append(callback)
 
@@ -125,7 +129,11 @@ def topic_partitions(topic: Mapping[str, Any]) -> Tuple[str, str]:
 class _Station:
     """Bounded per-topic queues served by one worker, highest priority first."""
 
-    def __init__(self, topics: Mapping[str, Mapping[str, Any]]) -> None:
+    def __init__(self, topics: Mapping[str, Mapping[str, Any]], keep_last: bool = False) -> None:
+        #: DDS KEEP_LAST: a full queue replaces its oldest sample whatever the
+        #: reliability (``qos_semantics="dds"``); otherwise BEST_EFFORT rejects
+        #: the new sample, as the published engine does.
+        self.keep_last = keep_last
         self.cond = threading.Condition()
         self.queues: Dict[str, deque] = {t: deque() for t in topics}
         self.capacity = {t: int(spec.get("history_depth") or DEFAULT_QUEUE) for t, spec in topics.items()}
@@ -140,7 +148,7 @@ class _Station:
             q = self.queues[topic]
             dropped = None
             if len(q) >= self.capacity[topic]:
-                if not self.reliable[topic]:
+                if not self.reliable[topic] and not self.keep_last:
                     return item
                 dropped = q.popleft()
             q.append(item)
@@ -184,15 +192,26 @@ class AppRuntime:
         self._threads: List[threading.Thread] = []
         self._msg_id = 0
         self._id_lock = threading.Lock()
+        self.dds = plan.get("qos_semantics") == "dds"
         ins = {t: self.topics[t] for t in self.spec["subscribes"]}
-        self.station = _Station(ins)
+        self.station = _Station(ins, keep_last=self.dds)
+        owner = self.instance if len(self.replicas) > 1 else app
+        # Agent-level statuses (the testbed's own count, next to Cyclone's).
+        self.monitors: Dict[Tuple[str, str], DeadlineMonitor] = {}
+        for kind, topics in (("reader", self.spec["subscribes"]), ("writer", self.spec["publishes"])):
+            for t in topics:
+                d = self.topics[t].get("deadline_ms")
+                if d is not None and float(d) > 0:
+                    self.monitors[(kind, t)] = DeadlineMonitor(float(d) / 1000.0, [])
+        self.status_counts: Dict[Tuple[str, str, str], int] = defaultdict(int)
+        self._reported: Dict[Tuple[str, str, str], int] = {}
         self._writers = {
-            t: transport.writer(t, topic_partitions(self.topics[t])[0], self.topics[t])
+            t: transport.writer(t, topic_partitions(self.topics[t])[0], self.topics[t], owner=owner)
             for t in self.spec["publishes"]
         }
         for t in self.spec["subscribes"]:
             transport.subscribe(t, topic_partitions(self.topics[t])[1], self.topics[t],
-                                lambda s, t=t: self._on_sample(t, s))
+                                lambda s, t=t: self._on_sample(t, s), owner=owner)
         if len(self.replicas) > 1:
             self._hb = transport.writer(HEARTBEAT_TOPIC, DIRECT, {"reliability": "BEST_EFFORT"})
             transport.subscribe(HEARTBEAT_TOPIC, DIRECT, {"reliability": "BEST_EFFORT"},
@@ -307,6 +326,9 @@ class AppRuntime:
                 mid = self._msg_id
             sample = {"msg_id": mid, "publisher": self.app, "created": now,
                       "size": int(self.topics[topic].get("size", 64))}
+            mon = self.monitors.get(("writer", topic))
+            if mon is not None:
+                mon.arrival(now)
             self._writers[topic](sample)
             self.sink.emit(make_event(now, "saag.publish", self.app, topic,
                                       **{"messaging.message.id": mid}))
@@ -320,10 +342,31 @@ class AppRuntime:
             # start stalled, but serve and record nothing.
             self.last_fresh[topic] = now
             return
+        mon = self.monitors.get(("reader", topic))
+        if mon is not None:
+            mon.arrival(now)    # DDS reception, not processing
         dropped = self.station.put(topic, sample)
         if dropped is not None:
+            rejected = dropped is sample
+            self.status_counts[("reader", topic, "sample_rejected" if rejected
+                                else "cache_replaced_dropped_samples")] += 1
             self.sink.emit(make_event(now, "saag.drop", self.app, topic,
                                       publisher=dropped.get("publisher")))
+
+    def status_events(self, now: float) -> List[Dict[str, Any]]:
+        """`saag.status` records for agent-level counts that changed since the last call."""
+        counts = dict(self.status_counts)
+        for (kind, topic), mon in self.monitors.items():
+            name = "requested_deadline_missed" if kind == "reader" else "offered_deadline_missed"
+            counts[(kind, topic, name)] = mon.pending(now)
+        out = []
+        for (kind, topic, name), value in sorted(counts.items()):
+            if value and self._reported.get((kind, topic, name)) != value:
+                self._reported[(kind, topic, name)] = value
+                out.append(make_event(now, "saag.status", self.app, topic, status=name,
+                                      count=value, entity=kind, source="agent",
+                                      instance=self.instance))
+        return out
 
     def _worker(self) -> None:
         while not self.stop.is_set():
@@ -344,7 +387,9 @@ class AppRuntime:
             done = self.clock()
             latency_ms = (done - float(sample["created"])) * 1000.0
             deadline = self.topics[topic].get("deadline_ms")
-            if deadline is not None and latency_ms > float(deadline):
+            # The published engine's latency drop; under DDS semantics a
+            # deadline is a period contract and drops nothing.
+            if not self.dds and deadline is not None and latency_ms > float(deadline):
                 self.sink.emit(make_event(done, "saag.deadline_miss", self.app, topic,
                                           publisher=sample.get("publisher"), latency_ms=latency_ms))
                 continue
@@ -376,10 +421,13 @@ class BrokerRelay:
         self.heard: Dict[str, float] = {}
         self._threads: List[threading.Thread] = []
         topics = plan["topics"]
-        self.station = _Station({t: topics[t] for t in self.spec["routes"]})
-        self._out = {t: transport.writer(t, EGRESS, topics[t]) for t in self.spec["routes"]}
+        self.station = _Station({t: topics[t] for t in self.spec["routes"]},
+                                keep_last=plan.get("qos_semantics") == "dds")
+        self._out = {t: transport.writer(t, EGRESS, topics[t], owner=broker)
+                     for t in self.spec["routes"]}
         for t in self.spec["routes"]:
-            transport.subscribe(t, INGRESS, topics[t], lambda s, t=t: self._on_sample(t, s))
+            transport.subscribe(t, INGRESS, topics[t], lambda s, t=t: self._on_sample(t, s),
+                                owner=broker)
         self._hb = transport.writer(HEARTBEAT_TOPIC, DIRECT, {"reliability": "BEST_EFFORT"})
         transport.subscribe(HEARTBEAT_TOPIC, DIRECT, {"reliability": "BEST_EFFORT"}, self._on_heartbeat)
 

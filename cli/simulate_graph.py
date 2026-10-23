@@ -124,6 +124,7 @@ from saag.simulation.message_flow_simulator import (
     SERVICE_DISTRIBUTIONS,
     UTILIZATION_MODES,
 )
+from saag.simulation.runtime.dds_status import QOS_SEMANTICS
 from saag.simulation.runtime.faults import DEPLOYMENT_MODELS, FaultSpec, RuntimeFaultMode
 from saag.simulation.runtime.labels import RUNTIME_LABEL_SETTINGS
 from saag.simulation.runtime.workload import WORKLOAD_MODELS
@@ -359,6 +360,8 @@ def _runtime_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
         "workload_model": getattr(args, "workload_model", "declared"),
         "staleness_periods": getattr(args, "staleness_periods", 3.0),
         "network_gating": getattr(args, "network_gating", False),
+        "qos_semantics": getattr(args, "qos_semantics", "engine"),
+        "dds_status": getattr(args, "dds_status", False),
     }
 
 
@@ -432,7 +435,8 @@ def _run_testbed(args: argparse.Namespace) -> None:
         if not args.input:
             logger.error("testbed build needs --input")
             sys.exit(1)
-        orchestrate.build(Path(args.input), out, args.duration, args.seed, args.target_utilization)
+        orchestrate.build(Path(args.input), out, args.duration, args.seed, args.target_utilization,
+                          qos_semantics=args.qos_semantics)
         print(f"Testbed written → {out}")
     elif args.action == "run":
         faults = ([FaultSpec.from_dict(d) for d in json.loads(Path(args.faults).read_text())]
@@ -797,6 +801,14 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="'mmpp': bursty arrivals with the declared mean rate.")
         p.add_argument("--staleness-periods", type=float, default=3.0, metavar="K",
                        help="Reactive model: input freshness window in periods.  Default: 3")
+        p.add_argument("--qos-semantics", choices=QOS_SEMANTICS, default="engine",
+                       help="'dds': DEADLINE is a period contract that drops nothing, "
+                            "KEEP_LAST replaces the oldest sample, request-vs-offered "
+                            "incompatible pairs do not communicate.  Default: engine "
+                            "(published: late samples dropped on deadline_ms)")
+        p.add_argument("--dds-status", action="store_true",
+                       help="Count DDS standard statuses (deadline missed, sample lost/"
+                            "rejected, liveliness, incompatible QoS) into the result.")
         p.add_argument("--network-gating", action="store_true",
                        help="With --deployment-model stations: CONNECTS_TO reachability "
                             "gates delivery (host outages and link_flap partition).")
@@ -1094,6 +1106,8 @@ def _build_parser() -> argparse.ArgumentParser:
     tb.add_argument("--mode", choices=("local", "docker"), default="local")
     tb.add_argument("--faults", default=None, metavar="FAULTS.json")
     tb.add_argument("--target-utilization", type=float, default=0.65, metavar="RHO")
+    tb.add_argument("--qos-semantics", choices=QOS_SEMANTICS, default="engine",
+                    help="build: agents' QoS semantics ('dds': period deadlines, KEEP_LAST).")
     tb.add_argument("--calibrated", action="store_true",
                     help="fidelity: simulate with profile.json from 'calibrate'.")
     tb.add_argument("--verbose", "-v", action="store_true")
