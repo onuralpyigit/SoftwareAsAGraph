@@ -53,7 +53,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .models import RuntimeTelemetryProfile
 
-EVENT_NAMES = ("saag.publish", "saag.deliver", "saag.deadline_miss", "saag.drop", "saag.state")
+EVENT_NAMES = ("saag.publish", "saag.deliver", "saag.deadline_miss", "saag.drop", "saag.state",
+               "saag.status")
 
 
 def make_event(t: float, name: str, app: str, topic: Optional[str] = None, **attrs: Any) -> Dict[str, Any]:
@@ -98,6 +99,12 @@ class TelemetryTrace:
                 "latency_ms": a.get("saag.latency_ms"),
                 "service_ms": a.get("saag.service_ms"),
                 "state": a.get("saag.state"),
+                # saag.status: a DDS standard status count (runtime/dds_status).
+                "status": a.get("saag.status"),
+                "count": a.get("saag.count"),
+                "entity": a.get("saag.entity"),
+                "source": a.get("saag.source"),
+                "instance": a.get("saag.instance"),
             })
         events.sort(key=lambda e: e["t"])
         start = start_s if start_s is not None else (events[0]["t"] if events else 0.0)
@@ -126,6 +133,42 @@ class TelemetryTrace:
     def times(self, kind: str, app: Optional[str] = None, topic: Optional[str] = None) -> List[float]:
         return [e["t"] for e in self.events if e["kind"] == kind
                 and (app is None or e["app"] == app) and (topic is None or e["topic"] == topic)]
+
+    def status_counts(self, until: Optional[float] = None,
+                      prefer: Sequence[str] = ("cyclone", "simulator", "agent"),
+                      exclude_instances: Iterable[str] = ()) -> Dict[str, Dict[str, int]]:
+        """Latest value of every DDS status per entity, as of *until* (default: end).
+
+        Keys follow `saag.simulation.runtime.dds_status.entity_key`. Several
+        sources may report one status (the testbed's agent count and Cyclone's
+        own); the first of *prefer* present wins. A replicated component's
+        instances are combined by taking the maximum, since only the active one
+        is counting. *exclude_instances* drops reports from instances that died
+        (``"A"`` or ``"A@H1"``): a dead entity's last report is stale, which
+        matters for gauges.
+        """
+        excluded = set(exclude_instances)
+        latest: Dict[Tuple[str, str, str, str], Tuple[float, int]] = {}
+        for e in self.events:
+            if e["kind"] != "status" or (until is not None and e["t"] > until):
+                continue
+            src = e.get("source") or "agent"
+            inst = e.get("instance") or e["app"]
+            if inst in excluded:
+                continue
+            key = (e["status"], f"{e['entity']}|{e['topic']}|{e['app']}", src, inst)
+            latest[key] = (e["t"], int(e["count"] or 0))
+        by_src: Dict[Tuple[str, str, str], int] = {}
+        for (status, ent, src, _inst), (_, value) in latest.items():
+            k = (status, ent, src)
+            by_src[k] = max(by_src.get(k, 0), value)
+        out: Dict[str, Dict[str, int]] = defaultdict(dict)
+        for status, ent in sorted({(st, en) for st, en, _ in by_src}):
+            for src in prefer:
+                if (status, ent, src) in by_src:
+                    out[status][ent] = by_src[(status, ent, src)]
+                    break
+        return dict(out)
 
     def apps(self) -> List[str]:
         return sorted({e["app"] for e in self.events if e["app"]})

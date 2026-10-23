@@ -374,6 +374,8 @@ Runtime-engine flags ([failure-simulation.md §7.11](failure-simulation.md#711-r
 | `--workload-model` | `declared` | `mmpp`: bursty arrivals, same mean rate |
 | `--staleness-periods` | `3.0` | Reactive input-freshness window, in periods |
 | `--network-gating` | off | With `stations`: CONNECTS_TO reachability gates delivery |
+| `--qos-semantics` | `engine` | `dds`: DEADLINE as a period contract (no drops), KEEP_LAST replaces the oldest sample, request-vs-offered incompatible pairs do not communicate ([failure-simulation.md §7.13](failure-simulation.md#713-dds-qos-semantics--standard-status-metrics-opt-in)) |
+| `--dds-status` | off | Count DDS standard statuses into the result (implied by `--qos-semantics dds`) |
 | `--fault-mode` | `crash` | Runtime fault mode for `--fault-node` (`transient_crash`, `freeze`, `slowdown`, `omission`, `babbling`, `buffer_leak`, `redelivery_storm`, `link_flap`) |
 | `--fault-duration` | `None` | Duration of a bounded fault |
 | `--fault-param KEY=VALUE` | — | Fault parameter (repeatable), e.g. `k=4`, `p=0.5` |
@@ -385,7 +387,7 @@ Faults every candidate under the runtime engine and writes `runtime_labels.json`
 
 #### `testbed`
 
-`testbed {build,run,calibrate,fidelity} --output DIR` — the emulated DDS testbed ([failure-simulation.md §7.12](failure-simulation.md#712-emulated-dds-testbed-calibration--fidelity-opt-in)). `build --input SCENARIO --duration S` writes `deployment.json`, `Dockerfile` and `docker-compose.yml`. `run --duration S [--faults FILE] [--mode local|docker]` runs it; `local` is in-process and needs no containers, while `docker` builds an image that downloads `cyclonedds`. `calibrate` writes `profile.json`. `fidelity [--calibrated]` simulates the same run and writes `fidelity.json`.
+`testbed {build,run,calibrate,fidelity} --output DIR` (`build --qos-semantics dds` for DDS-semantics agents) — the emulated DDS testbed ([failure-simulation.md §7.12](failure-simulation.md#712-emulated-dds-testbed-calibration--fidelity-opt-in)). `build --input SCENARIO --duration S` writes `deployment.json`, `Dockerfile` and `docker-compose.yml`. `run --duration S [--faults FILE] [--mode local|docker]` runs it; `local` is in-process and needs no containers, while `docker` builds an image that downloads `cyclonedds`. `calibrate` writes `profile.json`. `fidelity [--calibrated]` simulates the same run and writes `fidelity.json`.
 
 #### `combined`
 

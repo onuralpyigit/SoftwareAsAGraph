@@ -31,8 +31,9 @@ from .deployment import build_deployment
 
 
 def build(scenario: Path, out_dir: Path, duration_s: float, seed: int = 0,
-          target_utilization: float = 0.65) -> Path:
-    plan = build_deployment(scenario, target_utilization=target_utilization)
+          target_utilization: float = 0.65, qos_semantics: str = "engine") -> Path:
+    plan = build_deployment(scenario, target_utilization=target_utilization,
+                            qos_semantics=qos_semantics)
     plan["source_scenario"] = str(Path(scenario))
     return write_testbed(plan, out_dir, duration_s, seed)
 
@@ -138,14 +139,35 @@ def simulate_like(out_dir: Path, settings: Optional[Dict[str, Any]] = None,
     kw = {"behavior_model": "reactive", "deployment_model": "stations",
           "rng_streams": "per_process", "replica_aware": True,
           "target_utilization": plan["target_utilization"],
-          "staleness_periods": plan["staleness_periods"], **(settings or {})}
+          "staleness_periods": plan["staleness_periods"],
+          "qos_semantics": plan.get("qos_semantics", "engine"), "dds_status": True,
+          "liveliness_lease_s": plan.get("liveliness_lease_s", 1.0), **(settings or {})}
     res = MessageFlowSimulator(g, duration=meta["duration_s"], seed=meta["seed"], faults=faults,
                                record_events=True, telemetry_profile=profile, **kw).run()
     return TelemetryTrace.from_records(res.events, start_s=0.0, end_s=meta["duration_s"])
 
 
+def _dead_instances(plan: Dict[str, Any], faults: List[Dict[str, Any]]) -> set:
+    """Instances that a permanent crash took down: ``"A"``, or ``"A@H"`` for a replica."""
+    dead = set()
+    for f in faults:
+        if f.get("mode") != "crash":
+            continue
+        target = f["target"]
+        if target in plan["hosts"]:
+            residents = plan["hosts"][target]
+            dead.update(residents["brokers"])
+            for a in residents["apps"]:
+                replicated = len(plan["apps"][a].get("hosts", [])) > 1
+                dead.add(f"{a}@{target}" if replicated else a)
+        else:
+            dead.add(target)
+    return dead
+
+
 def fidelity(out_dir: Path, calibrated: bool = False, warmup_s: float = 2.0) -> Dict[str, Any]:
-    from saag.validation.fidelity import compare_fault_response, compare_steady_state, stalled_in_trace
+    from saag.validation.fidelity import (
+        compare_dds_status, compare_fault_response, compare_steady_state, stalled_in_trace)
 
     out_dir = Path(out_dir)
     meta = json.loads((out_dir / "run.json").read_text())
@@ -163,6 +185,9 @@ def fidelity(out_dir: Path, calibrated: bool = False, warmup_s: float = 2.0) -> 
         sim_st = stalled_in_trace(simulated, first) - targets
         obs_st = stalled_in_trace(observed, first) - targets
         report["fault_response"] = compare_fault_response({}, {}, sim_st, obs_st)
+    report["dds_status"] = compare_dds_status(
+        simulated, observed, split_at=first if meta["faults"] else None,
+        dead_instances=_dead_instances(_load(out_dir), meta["faults"]))
     name = "fidelity_calibrated.json" if calibrated else "fidelity.json"
     (out_dir / name).write_text(json.dumps(report, indent=2, sort_keys=True, default=str))
     return report

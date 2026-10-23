@@ -235,6 +235,21 @@ def test_telemetry_survives_a_hard_kill(tmp_path):
     sink.close()
 
 
+def test_local_dds_semantics_status_agrees_with_the_simulator(tmp_path):
+    """Under qos_semantics="dds" the agents count DDS deadline misses (no drops),
+    and the readers that miss deadlines after the source dies match the simulator."""
+    d = orchestrate.build(scenario(tmp_path), tmp_path / "tb", duration_s=6.0, qos_semantics="dds")
+    assert json.loads((d / "deployment.json").read_text())["qos_semantics"] == "dds"
+    orchestrate.run(d, 6.0, [FaultSpec("S", "crash", 3.0)], mode="local")
+    from saag.testbed.collect import load_run
+    observed = load_run(d)
+    assert not observed.times("deadline_miss")          # nothing dropped as late
+    counts = observed.status_counts()
+    assert counts["requested_deadline_missed"].get("reader|t1|P", 0) >= 3   # 0.5 s period, 3 s
+    rep = orchestrate.fidelity(d, warmup_s=0.5)["dds_status"]
+    assert rep["statuses"]["requested_deadline_missed"]["after_split"]["fired_jaccard"] == 1.0
+
+
 # ── Calibrator round trip on a simulated trace ───────────────────────────────
 
 def chain_graph(trigger="all_of", f=20):

@@ -54,6 +54,7 @@
    - 7.10 [Academic Provenance: Convergent-Validity Research Probe](#710-academic-provenance-convergent-validity-research-probe)
    - 7.11 [Runtime Engine: Reactive Behaviour, Deployment & Gray Failures (Opt-In)](#711-runtime-engine-reactive-behaviour-deployment--gray-failures-opt-in)
    - 7.12 [Emulated DDS Testbed, Calibration & Fidelity (Opt-In)](#712-emulated-dds-testbed-calibration--fidelity-opt-in)
+   - 7.13 [DDS QoS Semantics & Standard Status Metrics (Opt-In)](#713-dds-qos-semantics--standard-status-metrics-opt-in)
 8. [Engine 5: `ChangePropagationSimulator` (Maintainability Reference — Oracle $I_M$)](#8-engine-5-changepropagationsimulator-maintainability-reference--oracle-i_m)
    - 8.1 [Quick Facts](#81-quick-facts)
    - 8.2 [Runtime Failure vs. Development-Time Interface Change](#82-runtime-failure-vs-development-time-interface-change)
@@ -802,10 +803,10 @@ The engine enforces five standard DDS QoS policies dynamically:
 | QoS Policy | Simulation Enforcement Mechanism |
 |:---|:---|
 | **Reliability (`RELIABLE`)** | Queue overflow triggers **head-drop** (drops oldest sample to retain freshest data, matching DDS `KEEP_LAST`). |
-| **Reliability (`BEST_EFFORT`)** | Queue overflow triggers **tail-drop** (drops incoming message immediately). |
+| **Reliability (`BEST_EFFORT`)** | Queue overflow triggers **tail-drop** (drops incoming message immediately). This is KEEP_ALL-with-resource-limits behaviour; DDS KEEP_LAST would replace the oldest sample. `qos_semantics="dds"` does that (§7.13). |
 | **History Depth (`history_depth`)** | Limits maximum queue buffer size. Overflow triggers head-drop or tail-drop. |
 | **Transport Priority (`transport_priority`)** | Orders message processing in `ServiceStation` via `simpy.PriorityResource`. High-priority messages jump ahead of normal traffic. |
-| **Deadline (`deadline_ms`)** | Measures end-to-end latency ($t_{\text{processed}} - t_{\text{created}}$). Latencies exceeding deadline log SLA violations. |
+| **Deadline (`deadline_ms`)** | Measures end-to-end latency ($t_{\text{processed}} - t_{\text{created}}$). A sample whose latency exceeds the deadline is **dropped** and counted as a violation. This is **not DDS DEADLINE semantics**: in DDS a deadline is a *period* contract (a miss means no new sample within the period) and nothing is dropped; dropping on age is LIFESPAN. These drops are the engine's dominant non-structural loss (0.7–5.9% of fault-free deliveries on five corpus scenarios, against ≤ 0.71% from overflow). `qos_semantics="dds"` implements the DDS meaning (§7.13). |
 
 ```mermaid
 flowchart TD
@@ -826,7 +827,7 @@ flowchart TD
     
     PROC --> LAT["Compute Latency = t_done - t_created"]
     LAT --> DDL{"Latency > deadline_ms?"}
-    DDL -- "Yes" --> SLA["Log Deadline SLA Violation"]
+    DDL -- "Yes" --> SLA["Drop sample, log violation<br>(engine semantics; LIFESPAN-like)"]
     DDL -- "No" --> DELIV["Mark Message Successfully Delivered"]
 ```
 
@@ -1229,6 +1230,68 @@ The first Docker runs found four defects that the in-process tests could not:
 4. Runtime network gating was on by default, which partitioned hosts the sparse corpus mesh never meant to isolate.
 
 Each now has a regression test, or is pinned by the Docker results above.
+
+### 7.13 DDS QoS Semantics & Standard Status Metrics (Opt-In)
+
+I reviewed the engine against the RTI Connext 7.7 Observability telemetry catalogue. Its DataReader and DataWriter metrics are named after the DCPS communication statuses. The review found three places where the published engine does not follow DDS semantics:
+
+| Policy | Published engine (`qos_semantics="engine"`) | DDS (`qos_semantics="dds"`) |
+|:---|:---|:---|
+| DEADLINE | Drops a sample whose end-to-end latency exceeds `deadline_ms` (LIFESPAN-like) | A *period* contract: a reader misses it when no new sample arrives within the period, a writer when it does not write within it. Nothing is dropped. |
+| KEEP_LAST, BEST_EFFORT | A full queue drops the **new** sample (KEEP_ALL with resource limits) | A full queue replaces the **oldest** sample, whatever the reliability |
+| Request-vs-offered matching | Never checked; every pair communicates | An incompatible (writer, reader) pair is never matched: reliability, durability ordering, deadline period |
+
+`qos_semantics="dds"` ([`runtime/dds_status.py`](../saag/simulation/runtime/dds_status.py)) implements the DDS column. The default stays `engine`, so published numbers do not move.
+
+**How much the published engine's deadline rule costs.** These are fault-free runs, 30 s, seed 1:
+
+| Scenario | Delivery, engine | Delivery, dds | DDS reader deadline misses |
+|:---|:---|:---|:---|
+| atm_system | 0.9811 | 0.9979 | 0 |
+| av_system | 0.9403 | 0.9993 | 0 |
+| microservices_system | 0.9501 | 0.9914 | 0 |
+| financial_trading_system | 0.9909 | 0.9996 | 0 |
+| iot_smart_city_system | 0.9840 | 0.9910 | 0 |
+
+The corpus never misses a DDS deadline in steady state: every declared period is met. What the published engine counts as deadline violations, and drops, comes entirely from treating the deadline as a latency limit. These drops are its dominant non-structural loss, 10–600× the overflow drops. Any result that leans on QoS "deadline enforcement" in I_dyn therefore leans on that interpretation. The DDS arm changes I_dyn, so pre-register before any reported use.
+
+**Status counting** (`dds_status=True`, implied by `dds`; pure observation). Counts are reported per entity (`reader|<topic>|<component>`, `writer|<topic>|<component>`) and per pre/post window in `MessageFlowResult.dds_status`. Each status keeps its DCPS name, with the RTI metric as an alias:
+
+| Status | RTI alias | Simulator source | Testbed (Cyclone getter) |
+|:---|:---|:---|:---|
+| `requested_deadline_missed` | `dds_data_reader_deadline_missed_total` | lazy period monitor on reception; pauses once the reader's matched writers are all gone (NOT_ALIVE_NO_WRITERS) | `get_requested_deadline_missed_status` |
+| `offered_deadline_missed` | `dds_data_writer_deadline_missed_total` | period monitor on emission while the writer is alive | `get_offered_deadline_missed_status` |
+| `sample_lost` | `dds_data_reader_sample_lost_total` | copies dropped on a cut network path | `get_sample_lost_status` |
+| `sample_rejected` | `dds_data_reader_sample_rejected_total` | engine arm only: a BEST_EFFORT new sample rejected by a full queue | `get_sample_rejected_status` |
+| `liveliness_alive_count` | — | matched writers alive at window end (relays for a brokered topic) | `get_liveliness_changed_status().alive_count` |
+| `liveliness_not_alive_count` | `dds_data_reader_liveliness_not_alive_count` | not simulated (see below) | `get_liveliness_changed_status().not_alive_count` |
+| `requested_incompatible_qos` | `dds_data_reader_incompatible_qos_total` | static request-vs-offered check | `get_requested_incompatible_qos_status` |
+| `cache_replaced_dropped_samples`, `cache_samples_peak` | `dds_data_reader_cache_*` | `SubscriberQueue` accounting | agent queue count |
+
+The testbed agents set AUTOMATIC liveliness with a lease (`liveliness_lease_s`, default 1 s). They poll the Cyclone getters from the WaitSet poller, never from listeners, and write `saag.status` events. `saag.validation.fidelity.compare_dds_status` compares them with the simulator. For each status it reports the Jaccard of the entities where it fired and the count error on common entities, for the run and for the window after the fault. Gauges skip instances that died; their last report is stale. Observed entities the simulator does not model, namely the broker relays' own readers and writers, are excluded and their number reported.
+
+**Two model corrections, measured on Cyclone.** The first Docker comparison disagreed on two statuses. Both disagreements were the simulator's model being wrong, and both are now corrected:
+
+1. With AUTOMATIC liveliness, a killed host's participant lease expires and its writers are *removed*. `alive_count` drops; `not_alive_count` stays 0. So the simulator reports `alive_count`, and `not_alive_count` is left to the middleware rather than reported as a simulated zero.
+2. Once an instance has no live writers, DDS stops monitoring its deadline. The simulator kept counting misses after a reader's writers had died.
+
+**Docker validation on `tiny_system`** (2026-10-23). The run used `qos_semantics="dds"`, host N1 killed at 20 s, a 50 s run and declared parameters, compared on application entities. It is a single-run smoke test.
+
+| Status | Fired: simulated / observed | Entity Jaccard | Count error on common entities |
+|:---|:---|:---|:---|
+| `liveliness_alive_count` | 15 / 15 | 1.0 | 0.0 |
+| `requested_deadline_missed` | 1 / 1 | 1.0 | 0.29 (9 vs 7) |
+| `offered_deadline_missed` | 3 / 3 | 1.0 | 0.07 |
+| `liveliness_not_alive_count` | — / 0 | — | — |
+| `sample_lost`, `sample_rejected`, `requested_incompatible_qos` | 0 / 0 | — | — |
+
+The steady-state metrics of the same run match the §7.12 results: topic rates exact, per-reader delivery median error 0.059, stall-set Jaccard 1.0.
+
+**Deferred.** These are left for later:
+- RTI Prometheus export and import (there is no RTI deployment to ingest);
+- participant UDP bandwidth;
+- the reliability protocol (heartbeats, NACKs, repairs);
+- RTI's aggregated alert categories.
 
 ---
 

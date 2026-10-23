@@ -25,8 +25,20 @@ def build_deployment(
     scenario: Path,
     target_utilization: float = 0.65,
     staleness_periods: float = STALENESS_PERIODS,
+    qos_semantics: str = "engine",
+    liveliness_lease_s: float = 1.0,
 ) -> Dict[str, Any]:
-    """Resolve everything an agent needs, once, so all agents agree on it."""
+    """Resolve everything an agent needs, once, so all agents agree on it.
+
+    ``qos_semantics`` as in `MessageFlowSimulator`: ``"dds"`` makes the agents
+    count deadlines as period misses instead of dropping late samples, and
+    replace the oldest sample of a full BEST_EFFORT queue.
+    ``liveliness_lease_s`` becomes every data writer's and reader's
+    AUTOMATIC liveliness lease.
+    """
+    from saag.simulation.runtime.dds_status import QOS_SEMANTICS
+    if qos_semantics not in QOS_SEMANTICS:
+        raise ValueError(f"qos_semantics must be one of {QOS_SEMANTICS}, got {qos_semantics!r}")
     g = load_graph(Path(scenario))
     ntype = {n: d.get("type") for n, d in g.nodes(data=True)}
     pubs, subs, routers, hosts_of = (defaultdict(list) for _ in range(4))
@@ -48,6 +60,7 @@ def build_deployment(
         qos = QoSPolicy.from_node_attrs(d)
         topics[t] = {
             "rate_hz": _rate(d),
+            "liveliness_lease_s": liveliness_lease_s,
             "reliability": qos.reliability,
             "durability": qos.durability,
             "deadline_ms": d.get("deadline_ms"),
@@ -108,6 +121,8 @@ def build_deployment(
         "scenario": g.graph.get("id", Path(scenario).stem),
         "target_utilization": target_utilization,
         "staleness_periods": staleness_periods,
+        "qos_semantics": qos_semantics,
+        "liveliness_lease_s": liveliness_lease_s,
         "topics": topics,
         "apps": apps,
         "brokers": brokers,
